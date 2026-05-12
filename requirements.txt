@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+browserbase
+pydantic
+httpx
+python-dotenv
