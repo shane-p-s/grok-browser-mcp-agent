@@ -1,56 +1,45 @@
-# Grok + Cursor Shared MCP Agent (Production Ready)
+# Grok Remote MCP Agent v1 (Final)
 
-**One MCP server that both Grok and Cursor can use.**
+**Production-ready shared MCP server for Grok + Cursor**
 
-- Browser Use (fully open source, DeepSeek-ready)
-- Google Cloud Run + Google Secret Manager
-- Smart human confirmation system
-- Context & token optimization
-- Hybrid support for your local OpenClaw
+This agent gives Grok real "hands" for everything I can't do natively:
+- Full browser automation (Browser Use)
+- Login & secrets handling (Google Secret Manager)
+- Smart confirmations with memory of your preferences
+- Code interpreter
+- Persistent browser sessions
+- Vision + screenshot analysis
+- Long-term memory + reflection (learns over time)
+- Smart DeepSeek model routing (fast vs reasoner)
 
-This is designed to be your long-term "remote hands + coding brain".
+## Quick Deploy (Google Cloud Run - Recommended)
 
-## Quick Deploy (Google Cloud Run)
-
-1. Get Browserbase is no longer used. We use Browser Use (self-hosted).
-2. Deploy with:
 ```bash
-gcloud run deploy grok-mcp-agent --source . --region us-central1 --allow-unauthenticated --set-secrets BROWSER_USE_LLM_API_KEY=deepseek-key:latest
+gcloud run deploy grok-mcp-agent \
+  --source . \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-secrets DEEPSEEK_API_KEY=deepseek-key:latest,BROWSERBASE_API_KEY=... # (if using Browserbase later)
 ```
-3. Add the URL as Custom MCP Connector in Grok.
 
-## How Cursor + Grok Share the Same MCP
+## Add as Custom MCP Connector in Grok
+1. Deploy above
+2. Go to grok.com/connectors
+3. New Connector → Custom
+4. Server URL: `https://your-url/mcp`
+5. Add Authorization header with a secret token (for security)
 
-Both can call the same tools. Grok orchestrates high-level tasks. Cursor can use the same server for development tasks (run tests, fix code, etc.).
+## Security
+- All secrets in Google Secret Manager
+- One-time secure links for new credentials
+- Smart confirmation system with memory
+- Only Grok (via connector) and you can access it
 
-## Smart Confirmation System
+## What This Agent Can Do
+- Book tee times, manage logins, fill forms
+- Control Cursor for development tasks
+- Run code safely
+- Remember what worked on specific sites
+- Automatically use the right DeepSeek model
 
-The agent will ask for confirmation intelligently:
-- One-time approve
-- Approve for this skill forever
-- Approve for this website/domain
-- Approve anytime for low-risk tasks
-- Never for this action
-
-You can reply with short commands like "approve forever", "approve for golf", "no".
-
-## Credential Management
-
-When a new login or API key is needed, the agent generates a one-time secure link. You click it, enter the data, and it goes straight into Google Secret Manager. I never see the actual values.
-
-## OpenClaw Hybrid Option
-
-You already have OpenClaw running locally. We can make the cloud agent call OpenClaw when full desktop control is needed (e.g. local apps, file management). This gives the best of both worlds.
-
-## Context & Token Optimization
-
-- LiteLLM for unified LLM calls + caching
-- DeepSeek native context caching (enabled by default)
-- Semantic memory (remembers successful past actions)
-- Prompt compression + summarization for long tasks
-- Strategic cache boundaries (stable prompts cached, dynamic content at the end)
-
-This keeps costs low even on long iterative work.
-
-## Next Steps
-Tell Grok what to improve or add next. The repo is designed to evolve with you.
+Built for long-term capability expansion. Ready when you are.

@@ -1,6 +1,8 @@
 fastapi
 uvicorn
-browserbase
+litellm
+browser-use
 pydantic
-httpx
 python-dotenv
+google-cloud-secret-manager
+chromadb  # for vector memory
