@@ -1,75 +1,56 @@
-# Grok Browser MCP Agent
+# Grok + Cursor Shared MCP Agent (Production Ready)
 
-**Full autonomous browser control for Grok via custom MCP connector.**
+**One MCP server that both Grok and Cursor can use.**
 
-Uses **Browserbase** (best-in-class managed browsers with anti-bot in 2026) + flexible LLM support (DeepSeek, Grok, OpenAI, Anthropic, etc.).
+- Browser Use (fully open source, DeepSeek-ready)
+- Google Cloud Run + Google Secret Manager
+- Smart human confirmation system
+- Context & token optimization
+- Hybrid support for your local OpenClaw
 
-Once connected as a Custom MCP Connector in Grok, you can say things like:
-- "Book me a tee time at Highland Pines for Saturday at 8am for 4 players"
-- "Check my upcoming golf reservations"
-- "Go to example.com and summarize the pricing page"
+This is designed to be your long-term "remote hands + coding brain".
 
-Grok will directly call tools on this agent with **zero manual steps** from you.
+## Quick Deploy (Google Cloud Run)
 
-## Quick Start (10-15 minutes)
-
-### 1. Get Browserbase API Key
-1. Go to [browserbase.com](https://www.browserbase.com) and sign up (free tier available).
-2. Create a new project and copy your **API Key** and **Project ID**.
-
-### 2. Deploy to Google Cloud Run (Recommended - Cheapest)
-
-#### Option A: One-click deploy (easiest)
-Click the button below (you'll need to connect your GitHub):
-
-[![Deploy to Cloud Run](https://deploy.cloud.run/button.svg)](https://deploy.cloud.run)
-
-#### Option B: Manual (still easy)
+1. Get Browserbase is no longer used. We use Browser Use (self-hosted).
+2. Deploy with:
 ```bash
-gcloud run deploy grok-browser-mcp-agent \
-  --source . \
-  --region us-central1 \
-  --allow-unauthenticated \
-  --set-secrets BROWSERBASE_API_KEY=browserbase-api-key:latest,BROWSERBASE_PROJECT_ID=browserbase-project-id:latest,LLM_API_KEY=your-llm-key:latest
+gcloud run deploy grok-mcp-agent --source . --region us-central1 --allow-unauthenticated --set-secrets BROWSER_USE_LLM_API_KEY=deepseek-key:latest
 ```
+3. Add the URL as Custom MCP Connector in Grok.
 
-### 3. Add as Custom MCP Connector in Grok
-1. Go to [grok.com/connectors](https://grok.com/connectors)
-2. Click **New Connector** > **Custom**
-3. Server URL: `https://your-cloud-run-url/mcp`
-4. Label: `browser-agent`
-5. (Optional) Add Authorization header if you set one
+## How Cursor + Grok Share the Same MCP
 
-### 4. Test
-Tell Grok: "Using my browser agent, check what tee times are available at Highland Pines this weekend."
+Both can call the same tools. Grok orchestrates high-level tasks. Cursor can use the same server for development tasks (run tests, fix code, etc.).
 
-Grok will now have real hands in the browser.
+## Smart Confirmation System
 
-## Configuration (Environment Variables)
+The agent will ask for confirmation intelligently:
+- One-time approve
+- Approve for this skill forever
+- Approve for this website/domain
+- Approve anytime for low-risk tasks
+- Never for this action
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `BROWSERBASE_API_KEY` | Yes | Your Browserbase API key |
-| `BROWSERBASE_PROJECT_ID` | Yes | Your Browserbase Project ID |
-| `LLM_PROVIDER` | No | `deepseek`, `openai`, `anthropic`, `grok`, `groq` (default: deepseek) |
-| `LLM_API_KEY` | Yes | Your API key for the chosen provider |
-| `LLM_MODEL` | No | Model name (e.g. `deepseek-chat`, `gpt-4o`) |
+You can reply with short commands like "approve forever", "approve for golf", "no".
 
-## Supported Tools (Grok can call these directly)
+## Credential Management
 
-- `book_pines_golf_tee_time` - Book at Highland or Augusta Pines
-- `get_upcoming_golf_reservations`
-- `execute_browser_task` - General purpose ("go to X and do Y")
-- `take_screenshot` - Useful for debugging
+When a new login or API key is needed, the agent generates a one-time secure link. You click it, enter the data, and it goes straight into Google Secret Manager. I never see the actual values.
 
-## Why This Stack?
-- **Browserbase**: Best anti-bot, persistent sessions, fast, reliable in 2026
-- **Pluggable LLM**: Use cheap DeepSeek or whatever you prefer
-- **MCP Native**: Works perfectly as Grok Custom Connector
-- **Extensible**: Easy to add more tools
+## OpenClaw Hybrid Option
 
-## Next Steps / Customization
+You already have OpenClaw running locally. We can make the cloud agent call OpenClaw when full desktop control is needed (e.g. local apps, file management). This gives the best of both worlds.
 
-This is a strong starter. Want me to add more tools, Cursor integration helpers, scheduling, or improve the golf booking logic? Just tell me (or open an issue).
+## Context & Token Optimization
 
-Built for you by Grok. Let's make it do everything you need.
+- LiteLLM for unified LLM calls + caching
+- DeepSeek native context caching (enabled by default)
+- Semantic memory (remembers successful past actions)
+- Prompt compression + summarization for long tasks
+- Strategic cache boundaries (stable prompts cached, dynamic content at the end)
+
+This keeps costs low even on long iterative work.
+
+## Next Steps
+Tell Grok what to improve or add next. The repo is designed to evolve with you.
