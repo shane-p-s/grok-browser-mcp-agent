@@ -19,6 +19,13 @@ from mcp.server.fastmcp import FastMCP
 import memory_store
 import tool_gating
 from cursor_agent_tools import register_cursor_tools
+from github_tools import (
+    github_get_diff as github_compare_api,
+    github_get_file_enriched,
+    github_list_repo_files as github_list_repo_files_api,
+    github_request,
+    safe_github_segment as _safe_github_segment,
+)
 from run_log import (
     append_event,
     finish_run,
@@ -51,6 +58,10 @@ _HEADED_RETRY_KEYS = (
     "robot check",
     "press and hold",
     "prove you're not a robot",
+    "challenge",
+    "cf-ray",
+    "attention required",
+    "enable javascript",
 )
 
 
@@ -64,12 +75,25 @@ def _resolve_browser_headed(task: str, headed: bool | None) -> tuple[bool, list[
     if headed is not None:
         return headed, domain_hints
     for d in domain_hints:
+        if memory_store.domain_headless_ok(d):
+            continue
         pref = memory_store.domain_headed_preference(d)
         if pref is True:
             return True, domain_hints
     if os.getenv("BROWSER_HEADED", "false").lower() in ("1", "true", "yes", "on"):
         return True, domain_hints
     return False, domain_hints
+
+
+def _primary_browser_domain(domain_hints: list[str], last_url: str | None) -> str | None:
+    return _host_from_url(last_url) or (domain_hints[0] if domain_hints else None)
+
+
+def _should_skip_headed_retry(domain_hints: list[str]) -> bool:
+    for d in domain_hints:
+        if memory_store.domain_headless_ok(d):
+            return True
+    return False
 
 
 def _host_from_url(url: str | None) -> str | None:
@@ -151,6 +175,8 @@ def register_tools(mcp: FastMCP) -> None:
             "ping",
             "fetch_url",
             "github_get_file",
+            "github_list_repo_files",
+            "github_get_diff",
             "github_create_issue",
             "browser_task",
             "cursor_agent",
@@ -256,19 +282,55 @@ def register_tools(mcp: FastMCP) -> None:
         repo: str,
         path: str,
         ref: str | None = None,
+        max_bytes: int | None = None,
     ) -> dict[str, Any]:
-        """Fetch file contents from github.com via REST (requires GITHUB_TOKEN)."""
+        """
+        Fetch file contents from github.com via REST (requires GITHUB_TOKEN).
+        Optional `ref`: branch name, tag, or commit SHA (GitHub Contents API).
+        Adds `content_text` (decoded UTF-8) for normal files; symlinks/submodules return hints.
+        """
         if (g := tool_gating.tool_disabled_error("github_get_file")) is not None:
             return g
         token = (os.getenv("GITHUB_TOKEN") or "").strip()
         if not token:
             return {"error": "GITHUB_TOKEN is not configured on the server."}
-        if not _safe_github_segment(owner) or not _safe_github_segment(repo):
-            return {"error": "invalid owner or repo"}
-        path = path.lstrip("/")
-        q = f"?ref={ref}" if ref else ""
-        api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}{q}"
-        return await _github_request("GET", api_url, token)
+        return await github_get_file_enriched(owner, repo, path, token, ref=ref, max_bytes=max_bytes)
+
+    @mcp.tool()
+    async def github_list_repo_files(
+        owner: str,
+        repo: str,
+        ref: str,
+        path: str = "",
+        recursive: bool = False,
+    ) -> dict[str, Any]:
+        """
+        List repository paths at an exact ref (branch, tag, or commit SHA).
+        Non-recursive: one level via Contents API. recursive=true: full tree via Git API (capped).
+        """
+        if (g := tool_gating.tool_disabled_error("github_list_repo_files")) is not None:
+            return g
+        token = (os.getenv("GITHUB_TOKEN") or "").strip()
+        if not token:
+            return {"error": "GITHUB_TOKEN is not configured on the server."}
+        return await github_list_repo_files_api(owner, repo, token, path=path, ref=ref, recursive=recursive)
+
+    @mcp.tool()
+    async def github_get_diff(
+        owner: str,
+        repo: str,
+        base: str,
+        head: str,
+    ) -> dict[str, Any]:
+        """
+        Compare two refs (branches, tags, or SHAs) via GitHub compare API. Returns capped per-file patches.
+        """
+        if (g := tool_gating.tool_disabled_error("github_get_diff")) is not None:
+            return g
+        token = (os.getenv("GITHUB_TOKEN") or "").strip()
+        if not token:
+            return {"error": "GITHUB_TOKEN is not configured on the server."}
+        return await github_compare_api(owner, repo, base, head, token)
 
     @mcp.tool()
     async def github_create_issue(
@@ -287,7 +349,7 @@ def register_tools(mcp: FastMCP) -> None:
             return {"error": "invalid owner or repo"}
         api_url = f"https://api.github.com/repos/{owner}/{repo}/issues"
         payload = {"title": title[:256], "body": body[:30000]}
-        return await _github_request("POST", api_url, token, json=payload)
+        return await github_request("POST", api_url, token, json=payload)
 
     @mcp.tool()
     async def browser_task(
@@ -383,9 +445,11 @@ def register_tools(mcp: FastMCP) -> None:
             except Exception as ex:
                 append_event(run_id, {"kind": "browser_summary_skipped", "message": str(ex)[:500]})
 
-            dom = _host_from_url(last_url) or (domain_hints[0] if domain_hints else None)
+            dom = _primary_browser_domain(domain_hints, last_url)
             if dom and headed_used:
                 memory_store.set_domain_headed_preference(dom, True, "successful headed run")
+            elif dom and not headed_used:
+                memory_store.set_domain_headless_ok(dom, True)
 
             finish_run(
                 run_id,
@@ -423,7 +487,7 @@ def register_tools(mcp: FastMCP) -> None:
             err_s = str(err)
             append_event(run_id, {"kind": "error", "name": type(err).__name__, "message": err_s[:1500]})
             blob = _browser_signals_blob(None, None, err_s)
-            if not headed_eff and _needs_headed_retry(blob):
+            if not headed_eff and _needs_headed_retry(blob) and not _should_skip_headed_retry(domain_hints):
                 append_event(
                     run_id,
                     {"kind": "headed_retry", "reason": "error_signals", "note": "high_impact: headed retry"},
@@ -436,6 +500,9 @@ def register_tools(mcp: FastMCP) -> None:
                     memory_store.append_failure_hint(
                         "browser_task",
                         f"headed retry recovered after {type(err).__name__}",
+                    )
+                    memory_store.append_recovery_pattern(
+                        "browser_task", "error_friction", "headed_retry_succeeded"
                     )
                     return _finalize_success(h2, True, True)
                 append_event(
@@ -465,7 +532,7 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception:
             pass
         blob = _browser_signals_blob(final, summary, "")
-        if not headed_eff and _needs_headed_retry(blob):
+        if not headed_eff and _needs_headed_retry(blob) and not _should_skip_headed_retry(domain_hints):
             append_event(
                 run_id,
                 {"kind": "headed_retry", "reason": "result_signals", "note": "high_impact: headed retry"},
@@ -479,6 +546,7 @@ def register_tools(mcp: FastMCP) -> None:
                 if dom:
                     memory_store.set_domain_headed_preference(dom, True, "headed retry after bot/login signals")
                 memory_store.append_failure_hint("browser_task", "headed retry after friction signals")
+                memory_store.append_recovery_pattern("browser_task", "result_friction", "headed_retry_succeeded")
                 return _finalize_success(h2, True, True)
             append_event(
                 run_id,
@@ -490,36 +558,6 @@ def register_tools(mcp: FastMCP) -> None:
             return out
 
         return _finalize_success(history, headed_eff, False)
-
-
-def _safe_github_segment(s: str) -> bool:
-    return bool(re.fullmatch(r"[A-Za-z0-9._-]{1,100}", s))
-
-
-async def _github_request(
-    method: str,
-    url: str,
-    token: str,
-    json: dict | None = None,
-) -> dict[str, Any]:
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "grok-browser-mcp-agent",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.request(method, url, headers=headers, json=json)
-            try:
-                data = r.json()
-            except Exception:
-                data = {"raw": r.text[:8000]}
-            if r.status_code >= 400:
-                return {"error": "github_api_error", "status_code": r.status_code, "body": data}
-            return {"status_code": r.status_code, "data": data}
-    except httpx.HTTPError as e:
-        return {"error": str(e)}
 
 
 def _parse_public_https_url(url: str) -> tuple[str, str] | dict[str, Any]:

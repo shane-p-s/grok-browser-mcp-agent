@@ -1,4 +1,4 @@
-"""File-backed operator memory: Cursor write approvals and per-domain browser headed preference."""
+"""File-backed operator memory: Cursor approvals/rules, browser headed/headless prefs, hints."""
 
 from __future__ import annotations
 
@@ -25,16 +25,23 @@ def memory_file_path() -> Path:
     return Path(base) / _DEFAULT_REL
 
 
+def _default_doc() -> dict[str, Any]:
+    return {
+        "version": 2,
+        "cursor_write_allowed": {},
+        "cursor_rules": {},
+        "browser_domain_headed": {},
+        "browser_domain_notes": {},
+        "browser_domain_headless_ok": {},
+        "failure_hints": [],
+        "recovery_patterns": [],
+    }
+
+
 def _load_unlocked() -> dict[str, Any]:
     p = memory_file_path()
     if not p.is_file():
-        return {
-            "version": 1,
-            "cursor_write_allowed": {},
-            "browser_domain_headed": {},
-            "browser_domain_notes": {},
-            "failure_hints": [],
-        }
+        return _default_doc()
     try:
         with open(p, encoding="utf-8") as f:
             data = json.load(f)
@@ -42,19 +49,18 @@ def _load_unlocked() -> dict[str, Any]:
             raise ValueError("not a dict")
         data.setdefault("version", 1)
         data.setdefault("cursor_write_allowed", {})
+        data.setdefault("cursor_rules", {})
         data.setdefault("browser_domain_headed", {})
         data.setdefault("browser_domain_notes", {})
+        data.setdefault("browser_domain_headless_ok", {})
         data.setdefault("failure_hints", [])
+        data.setdefault("recovery_patterns", [])
+        if int(data.get("version", 1)) < 2:
+            data["version"] = 2
         return data
     except Exception as e:
         logger.warning("memory load failed, using empty: %s", e)
-        return {
-            "version": 1,
-            "cursor_write_allowed": {},
-            "browser_domain_headed": {},
-            "browser_domain_notes": {},
-            "failure_hints": [],
-        }
+        return _default_doc()
 
 
 def _save_unlocked(data: dict[str, Any]) -> None:
@@ -74,9 +80,13 @@ def _norm_workspace(ws: str) -> str:
 
 
 def is_cursor_write_allowed(workspace_path: str) -> bool:
+    key = _norm_workspace(workspace_path)
     with _lock:
         d = _load_unlocked()
-        return bool(d.get("cursor_write_allowed", {}).get(_norm_workspace(workspace_path)))
+        if bool(d.get("cursor_write_allowed", {}).get(key)):
+            return True
+        rules = d.get("cursor_rules", {}).get(key) or {}
+        return bool(rules.get("always_allow_level_3"))
 
 
 def set_cursor_write_allowed(workspace_path: str, allowed: bool) -> None:
@@ -85,6 +95,22 @@ def set_cursor_write_allowed(workspace_path: str, allowed: bool) -> None:
         d = _load_unlocked()
         d.setdefault("cursor_write_allowed", {})
         d["cursor_write_allowed"][key] = allowed
+        if not allowed:
+            d.setdefault("cursor_rules", {})
+            d["cursor_rules"].pop(key, None)
+        _save_unlocked(d)
+
+
+def set_cursor_always_allow_level_3(workspace_path: str, enabled: bool) -> None:
+    """Persistent rule: treat workspace as approved for Level 3 without separate session flag."""
+    key = _norm_workspace(workspace_path)
+    with _lock:
+        d = _load_unlocked()
+        d.setdefault("cursor_rules", {})
+        if enabled:
+            d["cursor_rules"][key] = {"always_allow_level_3": True}
+        else:
+            d["cursor_rules"].pop(key, None)
         _save_unlocked(d)
 
 
@@ -98,6 +124,15 @@ def domain_headed_preference(domain: str) -> bool | None:
         if dkey not in m:
             return None
         return bool(m[dkey])
+
+
+def domain_headless_ok(domain: str) -> bool:
+    dkey = domain.strip().lower()
+    if not dkey:
+        return False
+    with _lock:
+        d = _load_unlocked()
+        return bool(d.get("browser_domain_headless_ok", {}).get(dkey))
 
 
 def set_domain_headed_preference(domain: str, prefers_headed: bool, note: str = "") -> None:
@@ -114,12 +149,35 @@ def set_domain_headed_preference(domain: str, prefers_headed: bool, note: str = 
         _save_unlocked(d)
 
 
+def set_domain_headless_ok(domain: str, ok: bool = True) -> None:
+    dkey = domain.strip().lower()
+    if not dkey:
+        return
+    with _lock:
+        d = _load_unlocked()
+        d.setdefault("browser_domain_headless_ok", {})
+        if ok:
+            d["browser_domain_headless_ok"][dkey] = True
+        else:
+            d["browser_domain_headless_ok"].pop(dkey, None)
+        _save_unlocked(d)
+
+
 def append_failure_hint(tool: str, hint: str) -> None:
     with _lock:
         d = _load_unlocked()
         lst = d.setdefault("failure_hints", [])
         lst.append({"ts": time.time(), "tool": tool, "hint": hint[:800]})
         del lst[:-50]
+        _save_unlocked(d)
+
+
+def append_recovery_pattern(tool: str, signal: str, action: str) -> None:
+    with _lock:
+        d = _load_unlocked()
+        lst = d.setdefault("recovery_patterns", [])
+        lst.append({"ts": time.time(), "tool": tool, "signal": signal[:400], "action": action[:400]})
+        del lst[:-40]
         _save_unlocked(d)
 
 
@@ -137,6 +195,9 @@ def memory_summary_for_status() -> dict[str, Any]:
         d = _load_unlocked()
         return {
             "cursor_write_workspaces_count": len(d.get("cursor_write_allowed", {})),
+            "cursor_rules_workspaces_count": len(d.get("cursor_rules", {})),
             "browser_domains_tracked": len(d.get("browser_domain_headed", {})),
+            "browser_domains_headless_ok_count": len(d.get("browser_domain_headless_ok", {})),
             "recent_failure_hints": d.get("failure_hints", [])[-5:],
+            "recent_recovery_patterns": d.get("recovery_patterns", [])[-5:],
         }

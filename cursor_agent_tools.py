@@ -89,10 +89,15 @@ def _resolve_workspace(workspace_path: str) -> tuple[Path | None, dict[str, Any]
 
 def register_cursor_tools(mcp: FastMCP) -> None:
     @mcp.tool()
-    async def approve_cursor_writes(workspace_path: str) -> dict[str, Any]:
+    async def approve_cursor_writes(
+        workspace_path: str,
+        always_allow_level_3_rule: bool = False,
+    ) -> dict[str, Any]:
         """
         Persistently allow capability_level=3 (apply + --force) for this workspace on this machine.
         workspace_path must lie under CURSOR_WORKSPACE_ROOTS. Revoke via revoke_cursor_writes.
+        If always_allow_level_3_rule=true, stores a durable rule so Level 3 stays allowed until revoke
+        (clears both session flag and rule).
         """
         if (g := tool_gating.tool_disabled_error("approve_cursor_writes")) is not None:
             return g
@@ -101,15 +106,18 @@ def register_cursor_tools(mcp: FastMCP) -> None:
             return err
         assert ws_resolved is not None
         memory_store.set_cursor_write_allowed(str(ws_resolved), True)
+        if always_allow_level_3_rule:
+            memory_store.set_cursor_always_allow_level_3(str(ws_resolved), True)
         return {
             "ok": True,
             "workspace": str(ws_resolved),
+            "always_allow_level_3_rule": always_allow_level_3_rule,
             "message": "Level 3 (apply changes) is now allowed for this workspace until revoked.",
         }
 
     @mcp.tool()
     async def revoke_cursor_writes(workspace_path: str) -> dict[str, Any]:
-        """Remove persisted Level-3 permission for this workspace."""
+        """Remove persisted Level-3 permission and any always-allow rule for this workspace."""
         if (g := tool_gating.tool_disabled_error("revoke_cursor_writes")) is not None:
             return g
         ws_resolved, err = _resolve_workspace(workspace_path)
@@ -136,7 +144,7 @@ def register_cursor_tools(mcp: FastMCP) -> None:
         - **1 – Read/Analyze:** `--mode ask`, never applies file changes (`--force` off).
         - **2 – Propose (default):** `--mode plan`, shows intended changes without applying.
         - **3 – Apply:** `--mode agent` + `--force` only if this workspace was approved via
-          `approve_cursor_writes` (or still allowed in memory).
+          `approve_cursor_writes` (or `always_allow_level_3_rule=true`) or **`cursor_rules.always_allow_level_3`** in memory.
 
         If `apply_changes=true`, that requests Level 3 (same as `capability_level=3`).
         The free `mode` parameter is ignored when derived mode comes from levels 1–3

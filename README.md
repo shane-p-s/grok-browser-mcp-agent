@@ -6,7 +6,7 @@ Use the connector URL **`https://<your-funnel-host>/mcp/`** with a **trailing sl
 
 ## Transport (MCP Python SDK)
 
-This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](https://github.com/modelcontextprotocol/python-sdk) PyPI package** with **`streamable_http_app()`** (Streamable HTTP / stateless HTTP). That is the supported high-level API for the same transport Grok calls “Streaming HTTP”; it is not a separate proprietary stack. Low-level-only wiring is possible but not required for protocol compatibility.
+This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](https://github.com/modelcontextprotocol/python-sdk) PyPI package** with **`streamable_http_app()`** (Streamable HTTP / stateless HTTP). Internally the same package wires **`StreamableHTTPSessionManager`** to the low-level **`mcp.server.lowlevel.server.Server`** (`MCPServer`). FastMCP is the **maintained facade** for tool registration and schemas; the wire protocol is the same as calling `streamable_http_app()` through that stack. A future refactor could drop the FastMCP import only if you replace tool registration with explicit `@server.list_tools` / `@server.call_tool` handlers (large change).
 
 ## Tools
 
@@ -15,23 +15,25 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 | `ping` | Connectivity check |
 | `get_status` | Redacted config snapshot (tokens as booleans only), memory counts, tool list; never blocked by `MCP_DISABLED_TOOLS` |
 | `fetch_url` | HTTPS GET with SSRF guards and size limits |
-| `github_get_file` | Read repo file via GitHub REST (`GITHUB_TOKEN`) |
+| `github_get_file` | Read file at optional **`ref`** (branch, tag, or commit SHA); includes decoded **`content_text`** for normal files (`GITHUB_TOKEN`) |
+| `github_list_repo_files` | List paths at a required **`ref`**; optional **`recursive`** tree (capped) |
+| `github_get_diff` | **`base`…`head`** compare with capped patches (`GITHUB_TOKEN`) |
 | `github_create_issue` | Open an issue (`GITHUB_TOKEN`) |
 | `browser_task` | **Browser Use** + **DeepSeek** (`DEEPSEEK_API_KEY`); default **headless**, per-domain headed memory, one **headed** retry on bot/login-like signals; optional **`BROWSER_USER_DATA_DIR`** for persistent cookies; returns **`run_id`** |
 | `cursor_agent` | [Cursor Agent CLI](https://cursor.com/docs/cli/headless): **`capability_level`** 1=`ask`, 2=`plan` (default), 3=`agent`+`--force` only after **`approve_cursor_writes`** for that workspace; returns **`run_id`** |
-| `approve_cursor_writes` | Persist Level 3 (apply) permission for one workspace (under `CURSOR_WORKSPACE_ROOTS`) |
-| `revoke_cursor_writes` | Remove Level 3 permission for a workspace |
+| `approve_cursor_writes` | Persist Level 3 (apply) for one workspace; set **`always_allow_level_3_rule=true`** for a durable “always allow” rule until **`revoke_cursor_writes`** |
+| `revoke_cursor_writes` | Remove Level 3 permission **and** any always-allow rule for a workspace |
 | `get_run_log` | Redacted, bounded event log for a **`run_id`** (debugging; no model chain-of-thought) |
 | `list_recent_runs` | Newest **`run_id`** entries from instrumented tools |
 
 ### Operator memory
 
-- **`AGENT_MEMORY_PATH`**: JSON file (default under `%LOCALAPPDATA%\grok-mcp-agent\memory.json`) storing Cursor write approvals and per-domain browser headed preferences.
+- **`AGENT_MEMORY_PATH`**: JSON file (default under `%LOCALAPPDATA%\grok-mcp-agent\memory.json`) storing Cursor write approvals, optional **`always_allow_level_3`** rules, per-domain headed/headless-ok prefs, and bounded recovery hints.
 - **`MCP_DISABLED_TOOLS`**: Comma-separated tool names rejected at call time (e.g. `browser_task,cursor_agent`). **`get_status`** is always allowed.
 
 ### Grok `allowed_tools`
 
-Start with `ping`, `get_status`, then `fetch_url`, then expand. For **`cursor_agent`**, default **`capability_level=2`** (plan / propose). **Level 3** applies edits only after the human (or operator) has called **`approve_cursor_writes`** for that repo path on the PC.
+Start with `ping`, `get_status`, then `fetch_url`, then expand. For **`cursor_agent`**, default **`capability_level=2`** (plan / propose). **Level 3** requires **`approve_cursor_writes`** (or **`always_allow_level_3_rule`**) for that workspace on the PC.
 
 ### Grok connector: `Authorization` header
 

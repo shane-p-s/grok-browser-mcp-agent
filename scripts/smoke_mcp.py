@@ -51,6 +51,23 @@ def main() -> int:
     status = rpc("tools/call", {"name": "get_status", "arguments": {}}, _id=5)
     print("tools/call get_status:", json.dumps(status, indent=2)[:2000])
 
+    gh = os.environ.get("GITHUB_TOKEN", "").strip()
+    if gh:
+        gf = rpc(
+            "tools/call",
+            {
+                "name": "github_get_file",
+                "arguments": {
+                    "owner": "octocat",
+                    "repo": "Hello-World",
+                    "path": "README",
+                    "ref": "master",
+                },
+            },
+            _id=6,
+        )
+        print("tools/call github_get_file:", json.dumps(gf, indent=2)[:1500])
+
     return 0
 
 

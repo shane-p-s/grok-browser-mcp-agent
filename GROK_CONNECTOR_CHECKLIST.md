@@ -9,7 +9,7 @@ This document is written for **Grok (or any LLM)** to validate whether a **custo
 Per xAI documentation ([Remote MCP Tools](https://docs.x.ai/developers/tools/remote-mcp)):
 
 - Remote MCP uses an **HTTPS** `server_url`.
-- Supported transports are **Streaming HTTP** and **SSE** (this server implements **Streamable HTTP** using the official **Python MCP SDK** package on PyPI (`mcp`), via **`FastMCP`** + **`streamable_http_app()`** — the high-level API for the same transport, not a separate protocol).
+- Supported transports are **Streaming HTTP** and **SSE** (this server implements **Streamable HTTP** using the official **Python MCP SDK** on PyPI (`mcp`): **`FastMCP.streamable_http_app()`** delegates to **`StreamableHTTPSessionManager`** + low-level **`MCPServer`** — same transport as the SDK’s streamable HTTP stack, not a separate protocol).
 - Optional connector fields include: **`authorization`** (sent as a request header to the MCP server), **`headers`**, **`allowed_tools`**, **`server_label`**, **`server_description`**.
 
 **Implication:** Grok’s infrastructure performs MCP as a **client** to your URL; your server must speak **real MCP** (JSON-RPC over the MCP HTTP transport), not a custom REST shape.
@@ -88,20 +88,22 @@ Exact names (for `allowed_tools` in Grok):
 | `ping` | Connectivity |
 | `get_status` | Redacted configuration + memory counts (**never** disabled by `MCP_DISABLED_TOOLS`) |
 | `fetch_url` | HTTPS GET with SSRF guards |
-| `github_get_file` | GitHub REST read |
+| `github_get_file` | GitHub REST read at optional **`ref`** (branch/tag/SHA); returns **`content_text`** when decodable |
+| `github_list_repo_files` | List repo paths at required **`ref`** (recursive tree capped) |
+| `github_get_diff` | Compare **`base`…`head`** with capped patches |
 | `github_create_issue` | GitHub REST write |
 | `browser_task` | Browser Use + DeepSeek; headless-first, per-domain headed memory, optional headed retry; returns **`run_id`** |
-| `cursor_agent` | Cursor `agent` CLI; levels **1=ask**, **2=plan (default)**, **3=agent+force** only after operator **`approve_cursor_writes`**; returns **`run_id`** |
-| `approve_cursor_writes` | Persist Level-3 permission for one workspace path |
-| `revoke_cursor_writes` | Clear Level-3 permission for one workspace path |
+| `cursor_agent` | Cursor `agent` CLI; levels **1=ask**, **2=plan (default)**, **3=agent+force** after **`approve_cursor_writes`** or durable rule; returns **`run_id`** |
+| `approve_cursor_writes` | Persist Level-3 permission; optional **`always_allow_level_3_rule`** for durable rule |
+| `revoke_cursor_writes` | Clear Level-3 permission **and** always-allow rule for one workspace path |
 | `get_run_log` | Redacted log for **`run_id`** |
 | `list_recent_runs` | Recent **`run_id`** list |
 
-**Operator memory file:** JSON at **`AGENT_MEMORY_PATH`** (default `%LOCALAPPDATA%\grok-mcp-agent\memory.json`) stores Cursor write approvals and per-domain browser headed preferences.
+**Operator memory file:** JSON at **`AGENT_MEMORY_PATH`** (default `%LOCALAPPDATA%\grok-mcp-agent\memory.json`) stores Cursor write approvals, optional **always-allow Level 3** rules, per-domain headed / headless-ok prefs, and bounded recovery hints.
 
 **Optional lockdown:** env **`MCP_DISABLED_TOOLS`** = comma-separated tool names to reject at **`tools/call`** time (e.g. `browser_task,cursor_agent`). **`get_status`** always runs.
 
-**Security guidance for Grok:** encourage the human to start with **`allowed_tools`** = `["ping","get_status","fetch_url"]`, then expand. **`cursor_agent`** Level **3** / `apply_changes=true` requires prior **`approve_cursor_writes`** on the PC for that workspace — high impact on disk when allowed.
+**Security guidance for Grok:** encourage the human to start with **`allowed_tools`** = `["ping","get_status","fetch_url"]`, then expand. **`cursor_agent`** Level **3** / `apply_changes=true` requires **`approve_cursor_writes`** or **`always_allow_level_3_rule`** for that workspace — high impact on disk when allowed.
 
 ---
 

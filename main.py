@@ -31,11 +31,11 @@ def build_mcp() -> FastMCP:
     mcp = FastMCP(
         "grok-browser-mcp-agent",
         instructions=(
-            "Remote tools: ping, fetch_url, github_get_file, github_create_issue, browser_task (Browser Use + DeepSeek), "
-            "cursor_agent (Cursor CLI; capability_level 1=ask read-only, 2=plan propose default, 3=agent+force after approve_cursor_writes), "
-            "approve_cursor_writes / revoke_cursor_writes, get_status (redacted config), get_run_log, list_recent_runs. "
-            "Primary deployment: Windows PC + Tailscale Funnel to localhost. Streamable HTTP via official mcp package (FastMCP). "
-            "browser_task and cursor_agent return run_id; use get_run_log(run_id)."
+            "Remote tools: ping, fetch_url, github_get_file (ref=branch/tag/SHA + content_text), github_list_repo_files, "
+            "github_get_diff, github_create_issue, browser_task, cursor_agent (levels 1/2/3; approve_cursor_writes with "
+            "optional always_allow_level_3_rule), revoke_cursor_writes, get_status, get_run_log, list_recent_runs. "
+            "Streamable HTTP: FastMCP wraps official mcp MCPServer + StreamableHTTPSessionManager (same transport as streamable_http_app). "
+            "browser_task/cursor_agent return run_id."
         ),
         stateless_http=True,
         json_response=_json_response_flag(),
