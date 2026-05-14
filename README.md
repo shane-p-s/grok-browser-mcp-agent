@@ -19,7 +19,10 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 | `github_list_repo_files` | List paths at a required **`ref`**; optional **`recursive`** tree (capped) |
 | `github_get_diff` | **`base`…`head`** compare with capped patches (`GITHUB_TOKEN`) |
 | `github_create_issue` | Open an issue (`GITHUB_TOKEN`) |
-| `browser_task` | **Browser Use** + **DeepSeek** (`DEEPSEEK_API_KEY`); default **headless**, per-domain headed memory, one **headed** retry on bot/login-like signals; optional **`BROWSER_USER_DATA_DIR`** for persistent cookies; returns **`run_id`** |
+| `request_user_secret` | One-time **`submit_url`** on **`127.0.0.1`** only; operator pastes value in browser; stored encrypted (`SECRETS_MASTER_KEY`) |
+| `list_secrets` | Stored secret **names** (+ optional `created_at`); never values |
+| `revoke_secret` | Delete a stored secret by name (idempotent) |
+| `browser_task` | **Browser Use** + **DeepSeek** (`DEEPSEEK_API_KEY`); default **headless**, per-domain headed memory, one **headed** retry on bot/login-like signals; optional **`BROWSER_USER_DATA_DIR`** for persistent cookies; optional **`secret_prefill`** (https URLs + selectors + `secret_name`) fills locally before the agent so values are not sent to the LLM; returns **`run_id`** |
 | `cursor_agent` | [Cursor Agent CLI](https://cursor.com/docs/cli/headless): **`capability_level`** 1=`ask`, 2=`plan` (default), 3=`agent`+`--force` only after **`approve_cursor_writes`** for that workspace; returns **`run_id`** |
 | `approve_cursor_writes` | Persist Level 3 (apply) for one workspace; set **`always_allow_level_3_rule=true`** for a durable “always allow” rule until **`revoke_cursor_writes`** |
 | `revoke_cursor_writes` | Remove Level 3 permission **and** any always-allow rule for a workspace |
@@ -129,6 +132,8 @@ Then set Grok’s connector URL to `https://<your-funnel-host>/mcp/` (with trail
 
 ## Security notes
 
+- **`browser_task`** sends the **`task`** string to **DeepSeek**. Do **not** embed passwords or other secrets in `task`. Use **`request_user_secret`** / **`list_secrets`** and reference names only, or structured **`secret_prefill`** (values resolved on the PC). Run logs store **`task_preview_redacted`** (e.g. `{{secret:name}}` → `[secret:name]`) plus standard env redaction.
+- **`request_user_secret`** serves a short-lived form on **localhost only** (no TLS). Anyone who can open a browser on that machine while the URL is valid could submit; treat **`submit_url`** like a capability token.
 - **`/mcp/`** requires **`Authorization: Bearer …`** as documented above; **`/health`** is open for probes.
 - On **Cloud Run** (`K_SERVICE`) or `ENVIRONMENT=production`, **`AUTH_TOKEN`** is required at startup (legacy self-host path).
 - **`fetch_url`** blocks common SSRF targets.

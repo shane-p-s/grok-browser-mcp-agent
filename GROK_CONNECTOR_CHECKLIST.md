@@ -92,7 +92,10 @@ Exact names (for `allowed_tools` in Grok):
 | `github_list_repo_files` | List repo paths at required **`ref`** (recursive tree capped) |
 | `github_get_diff` | Compare **`base`…`head`** with capped patches |
 | `github_create_issue` | GitHub REST write |
-| `browser_task` | Browser Use + DeepSeek; headless-first, per-domain headed memory, optional headed retry; returns **`run_id`** |
+| `request_user_secret` | Localhost-only one-time form URL; operator submits secret; encrypted at rest (`SECRETS_MASTER_KEY`) |
+| `list_secrets` | Names (+ optional `created_at`); never secret values |
+| `revoke_secret` | Delete stored secret by name (idempotent) |
+| `browser_task` | Browser Use + DeepSeek; headless-first, per-domain headed memory, optional headed retry; optional **`secret_prefill`** (https + selectors + secret names) fills on PC before agent; **`task`** must not contain raw secrets; returns **`run_id`** |
 | `cursor_agent` | Cursor `agent` CLI; levels **1=ask**, **2=plan (default)**, **3=agent+force** after **`approve_cursor_writes`** or durable rule; returns **`run_id`** |
 | `approve_cursor_writes` | Persist Level-3 permission; optional **`always_allow_level_3_rule`** for durable rule |
 | `revoke_cursor_writes` | Clear Level-3 permission **and** always-allow rule for one workspace path |
@@ -104,6 +107,8 @@ Exact names (for `allowed_tools` in Grok):
 **Optional lockdown:** env **`MCP_DISABLED_TOOLS`** = comma-separated tool names to reject at **`tools/call`** time (e.g. `browser_task,cursor_agent`). **`get_status`** always runs.
 
 **Security guidance for Grok:** encourage the human to start with **`allowed_tools`** = `["ping","get_status","fetch_url"]`, then expand. **`cursor_agent`** Level **3** / `apply_changes=true` requires **`approve_cursor_writes`** or **`always_allow_level_3_rule`** for that workspace — high impact on disk when allowed.
+
+**Secrets:** the **`browser_task`** `task` argument is sent to **DeepSeek**; never put raw credentials there. Use **`request_user_secret`** / **`secret_prefill`** / secret **names** only. Manual test: set **`SECRETS_MASTER_KEY`**, call **`request_user_secret`**, open **`submit_url`** on the PC, then **`list_secrets`** (CI typically skips the browser step).
 
 ---
 

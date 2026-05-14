@@ -42,6 +42,7 @@ def redact_string(text: str) -> str:
         "AUTH_TOKEN",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
+        "SECRETS_MASTER_KEY",
     ):
         s = re.sub(rf"(?i){re.escape(key)}\s*=\s*\S+", f"{key}=[REDACTED]", s)
     s = re.sub(r"(?i)(password|passwd|pwd)\s*[:=]\s*\S+", r"\1=[REDACTED]", s)

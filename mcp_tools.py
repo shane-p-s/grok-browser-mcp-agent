@@ -16,7 +16,10 @@ from urllib.parse import urlparse
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+import browser_prefill
 import memory_store
+import secrets_store
+import secrets_submit
 import tool_gating
 from cursor_agent_tools import register_cursor_tools
 from github_tools import (
@@ -126,6 +129,37 @@ def _browser_user_data_dir() -> str | None:
     return raw or None
 
 
+def _secret_prefill_summary(prefill: list[Any]) -> list[dict[str, Any]]:
+    """Names and selectors only (no secret values) for run logs."""
+    out: list[dict[str, Any]] = []
+    for step in prefill:
+        if not isinstance(step, dict):
+            continue
+        url = str(step.get("url") or "")
+        names: list[str] = []
+        selectors: list[str] = []
+        for f in step.get("fills") or []:
+            if isinstance(f, dict):
+                sn = f.get("secret_name")
+                if isinstance(sn, str) and sn:
+                    names.append(sn)
+                sel = f.get("selector")
+                if isinstance(sel, str) and sel:
+                    selectors.append(sel)
+        out.append({"url": url, "secret_names": names, "selectors": selectors})
+    return out
+
+
+def _secrets_misconfigured_response() -> dict[str, Any]:
+    return {
+        "error": "secrets_not_configured",
+        "hint": (
+            "Set SECRETS_MASTER_KEY (urlsafe base64 Fernet key) in .env. "
+            'Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
+        ),
+    }
+
+
 async def _browser_run_once(
     task: str,
     model: str,
@@ -178,6 +212,9 @@ def register_tools(mcp: FastMCP) -> None:
             "github_list_repo_files",
             "github_get_diff",
             "github_create_issue",
+            "request_user_secret",
+            "list_secrets",
+            "revoke_secret",
             "browser_task",
             "cursor_agent",
             "approve_cursor_writes",
@@ -196,6 +233,7 @@ def register_tools(mcp: FastMCP) -> None:
             "deepseek_configured": bool((os.getenv("DEEPSEEK_API_KEY") or "").strip()),
             "cursor_api_configured": bool((os.getenv("CURSOR_API_KEY") or "").strip()),
             "github_token_configured": bool((os.getenv("GITHUB_TOKEN") or "").strip()),
+            "secrets_configured": secrets_store.master_key_configured(),
             "memory_file": str(memory_store.memory_file_path()),
             "memory_summary": mem,
             "agent_log_dir_configured": log_dir or None,
@@ -352,6 +390,40 @@ def register_tools(mcp: FastMCP) -> None:
         return await github_request("POST", api_url, token, json=payload)
 
     @mcp.tool()
+    async def request_user_secret(name: str, description: str = "") -> dict[str, Any]:
+        """
+        Start a short-lived HTTP form on 127.0.0.1 only so the operator can submit a secret once; value is
+        encrypted locally (SECRETS_MASTER_KEY). Open submit_url on this PC in a browser. Never paste raw
+        secrets into browser_task task text (that string is sent to DeepSeek).
+        """
+        if (g := tool_gating.tool_disabled_error("request_user_secret")) is not None:
+            return g
+        return secrets_submit.start_secret_submit_server(name, description)
+
+    @mcp.tool()
+    async def list_secrets() -> dict[str, Any]:
+        """Return stored secret names and created_at metadata only (no values). Requires SECRETS_MASTER_KEY."""
+        if (g := tool_gating.tool_disabled_error("list_secrets")) is not None:
+            return g
+        if not secrets_store.master_key_configured():
+            return _secrets_misconfigured_response()
+        meta = secrets_store.list_secret_metadata()
+        return {"names": [m["name"] for m in meta], "entries": meta}
+
+    @mcp.tool()
+    async def revoke_secret(name: str) -> dict[str, Any]:
+        """Delete a stored secret by name (idempotent). Requires valid name format."""
+        if (g := tool_gating.tool_disabled_error("revoke_secret")) is not None:
+            return g
+        if not secrets_store.master_key_configured():
+            return _secrets_misconfigured_response()
+        err = secrets_store.validate_secret_name(name)
+        if err:
+            return {"error": "invalid_name", "detail": err}
+        secrets_store.delete_secret(name)
+        return {"ok": True}
+
+    @mcp.tool()
     async def browser_task(
         task: str,
         max_steps: int | None = None,
@@ -360,12 +432,17 @@ def register_tools(mcp: FastMCP) -> None:
         headed: bool | None = None,
         use_reasoner: bool = False,
         llm_model: str | None = None,
+        secret_prefill: list[Any] | None = None,
     ) -> dict[str, Any]:
         """
         Run a natural-language web automation task using Browser Use with DeepSeek (OpenAI-compatible API).
         Default is headless; per-domain memory may force headed. After a headless run, the server may retry
         once in headed mode if the result looks like bot/login/captcha friction. Set BROWSER_USER_DATA_DIR
         for persistent cookies. Requires DEEPSEEK_API_KEY.
+
+        Optional secret_prefill: list of {url, fills:[{selector, secret_name}]} — Playwright fills secrets
+        locally before the agent runs so values are not sent to the LLM. URLs must be https://. Never put
+        raw secret values in task (task is sent to DeepSeek); reference stored names only.
         """
         if (g := tool_gating.tool_disabled_error("browser_task")) is not None:
             return g
@@ -374,6 +451,12 @@ def register_tools(mcp: FastMCP) -> None:
             return {"error": "DEEPSEEK_API_KEY is not configured on the server."}
         if not task or not task.strip():
             return {"error": "task must be a non-empty string"}
+
+        prefill = secret_prefill if secret_prefill is not None else []
+        if prefill and not isinstance(prefill, list):
+            return {"error": "secret_prefill must be a list of steps or omitted"}
+        if prefill and not secrets_store.master_key_configured():
+            return _secrets_misconfigured_response()
 
         ms = max_steps if max_steps is not None else _DEFAULT_BROWSER_MAX_STEPS
         ms = max(1, min(ms, 200))
@@ -402,18 +485,41 @@ def register_tools(mcp: FastMCP) -> None:
         except ImportError as e:
             return {"error": f"browser_use not available: {e}"}
 
-        run_id = start_run(
-            "browser_task",
-            {
-                "task_preview": task.strip()[:240],
-                "max_steps": ms,
-                "timeout_seconds": to,
-                "model": model,
-                "headed": headed_eff,
-                "domain_hints": domain_hints,
-                "user_data_dir": bool(user_data),
-            },
-        )
+        task_redacted = secrets_store.redact_task_for_log(task.strip())
+        run_meta: dict[str, Any] = {
+            "task_preview_redacted": task_redacted,
+            "max_steps": ms,
+            "timeout_seconds": to,
+            "model": model,
+            "headed": headed_eff,
+            "domain_hints": domain_hints,
+            "user_data_dir": bool(user_data),
+            "secret_prefill": bool(prefill),
+        }
+        if prefill:
+            run_meta["secret_prefill_summary"] = _secret_prefill_summary(prefill)
+        run_id = start_run("browser_task", run_meta)
+
+        if prefill:
+            append_event(run_id, {"kind": "secret_prefill_start"})
+            perr = await browser_prefill.run_secret_prefill(prefill, headed_eff, user_data)
+            if perr:
+                append_event(run_id, {"kind": "secret_prefill_failed", "message": perr[:800]})
+                finish_run(
+                    run_id,
+                    "error",
+                    {"error": "secret_prefill_failed", "message": perr[:2000]},
+                )
+                return {
+                    "run_id": run_id,
+                    "error": "secret_prefill_failed",
+                    "message": perr,
+                    "headed": headed_eff,
+                    "headed_retry": False,
+                    "domain_hints": domain_hints,
+                }
+            append_event(run_id, {"kind": "secret_prefill_ok"})
+
         append_event(run_id, {"kind": "agent_created"})
 
         history, err = await _browser_run_once(
