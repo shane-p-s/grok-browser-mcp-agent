@@ -169,6 +169,53 @@ def _clip_screenshot_base64(b64: str) -> tuple[str | None, str | None]:
     return None, f"screenshot_too_large_base64_chars={len(b64)}_max={max_chars}"
 
 
+def _build_screenshot_payload(raw_b64: str) -> dict[str, Any]:
+    """
+    Prefer PUBLIC_MCP_BASE_URL + one-time GET /browser-screenshot/{token} so clients fetch the full PNG
+    instead of embedding megabytes of base64 in JSON. Set BROWSER_SCREENSHOT_INCLUDE_BASE64=true to also inline.
+    """
+    import base64
+    import binascii
+
+    out: dict[str, Any] = {}
+    try:
+        data = base64.b64decode(raw_b64, validate=True)
+    except (ValueError, binascii.Error):
+        return {"screenshot_note": "invalid_screenshot_base64"}
+
+    base = (os.getenv("PUBLIC_MCP_BASE_URL") or "").strip().rstrip("/")
+    include_b64 = (os.getenv("BROWSER_SCREENSHOT_INCLUDE_BASE64") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    url_ok = False
+    if base:
+        import screenshot_serve as ss
+
+        tok = ss.register_png_bytes(data)
+        if tok:
+            out["screenshot_url"] = f"{base}/browser-screenshot/{tok}"
+            out["screenshot_url_single_use"] = True
+            out["screenshot_url_ttl_seconds"] = int(os.getenv("BROWSER_SCREENSHOT_URL_TTL_SECONDS", "600"))
+            url_ok = True
+        else:
+            out["screenshot_note"] = "png_too_large_for_url_register_see_BROWSER_SCREENSHOT_MAX_BYTES"
+
+    if (not url_ok) or include_b64:
+        cb, note = _clip_screenshot_base64(raw_b64)
+        if cb:
+            out["screenshot_base64"] = cb
+            out["screenshot_mime"] = "image/png"
+        if note:
+            prev = out.get("screenshot_note")
+            out["screenshot_note"] = f"{prev};{note}" if prev else note
+    elif url_ok:
+        out["screenshot_delivery"] = "url_only_no_inline_base64"
+    return out
+
+
 async def _browser_run_once(
     task: str,
     model: str,
@@ -263,6 +310,7 @@ def register_tools(mcp: FastMCP) -> None:
             "oauth_auth_configured": oauth_auth_configured(),
             "mcp_auth_configured": mcp_auth_configured(),
             "mcp_extra_allowed_hosts_configured": bool((os.getenv("MCP_EXTRA_ALLOWED_HOSTS") or "").strip()),
+            "public_mcp_base_url_configured": bool((os.getenv("PUBLIC_MCP_BASE_URL") or "").strip()),
             "mcp_dns_rebinding_protection_disabled": (os.getenv("MCP_DNS_REBINDING_PROTECTION") or "")
             .strip()
             .lower()
@@ -482,10 +530,11 @@ def register_tools(mcp: FastMCP) -> None:
         locally before the agent runs so values are not sent to the LLM. URLs must be https://. Never put
         raw secret values in task (task is sent to DeepSeek); reference stored names only.
 
-        If return_screenshot=true, the last step's viewport screenshot is included as screenshot_base64 (PNG)
-        when available, capped by BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS (default 700000). Grok (or other
-        multimodal clients) can use it for closed-loop steering. DeepSeek inside browser-use may still disable
-        use_vision for model names containing "deepseek".
+        If return_screenshot=true, when a viewport PNG is available the tool prefers a short-lived HTTPS URL
+        (GET /browser-screenshot/{token}) when PUBLIC_MCP_BASE_URL matches your Funnel origin — Grok fetches the
+        full image without megabytes of base64 in JSON. Optional BROWSER_SCREENSHOT_INCLUDE_BASE64=true also inlines
+        clipped base64 (BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS, default 700000). Without PUBLIC_MCP_BASE_URL,
+        behavior matches the legacy inline path only.
         """
         if (g := tool_gating.tool_disabled_error("browser_task")) is not None:
             return g
@@ -566,19 +615,19 @@ def register_tools(mcp: FastMCP) -> None:
 
         append_event(run_id, {"kind": "agent_created"})
 
-        clip_b64: str | None = None
-        clip_note: str | None = None
+        screenshot_payload: dict[str, Any] = {}
 
         def _merge_shot(out: dict[str, Any]) -> dict[str, Any]:
             if not return_screenshot:
                 return out
             r = dict(out)
-            if clip_b64:
-                r["screenshot_base64"] = clip_b64
-                r["screenshot_mime"] = "image/png"
-            if clip_note:
-                r["screenshot_note"] = clip_note
+            r.update(screenshot_payload)
             return r
+
+        def _after_screenshot_built(sp: dict[str, Any]) -> None:
+            sn = sp.get("screenshot_note")
+            if sn and any(x in sn for x in ("too_large", "invalid_screenshot", "png_too_large")):
+                append_event(run_id, {"kind": "screenshot_omitted", "detail": str(sn)[:300]})
 
         history, err, raw_shot = await _browser_run_once(
             task.strip(),
@@ -591,9 +640,8 @@ def register_tools(mcp: FastMCP) -> None:
             return_screenshot=return_screenshot,
         )
         if return_screenshot and raw_shot:
-            clip_b64, clip_note = _clip_screenshot_base64(raw_shot)
-            if clip_note:
-                append_event(run_id, {"kind": "screenshot_omitted", "detail": clip_note[:300]})
+            screenshot_payload = _build_screenshot_payload(raw_shot)
+            _after_screenshot_built(screenshot_payload)
 
         headed_retry = False
         ms2 = max(1, ms - 10)
@@ -644,11 +692,7 @@ def register_tools(mcp: FastMCP) -> None:
                 "domain_hints": domain_hints,
             }
             if return_screenshot:
-                if clip_b64:
-                    d["screenshot_base64"] = clip_b64
-                    d["screenshot_mime"] = "image/png"
-                if clip_note:
-                    d["screenshot_note"] = clip_note
+                d.update(screenshot_payload)
             return d
 
         if isinstance(err, asyncio.TimeoutError):
@@ -688,9 +732,8 @@ def register_tools(mcp: FastMCP) -> None:
                     return_screenshot=return_screenshot,
                 )
                 if return_screenshot and raw2:
-                    clip_b64, clip_note = _clip_screenshot_base64(raw2)
-                    if clip_note:
-                        append_event(run_id, {"kind": "screenshot_omitted", "detail": clip_note[:300]})
+                    screenshot_payload = _build_screenshot_payload(raw2)
+                    _after_screenshot_built(screenshot_payload)
                 if err2 is None and h2 is not None:
                     memory_store.append_failure_hint(
                         "browser_task",
@@ -746,9 +789,8 @@ def register_tools(mcp: FastMCP) -> None:
                 return_screenshot=return_screenshot,
             )
             if return_screenshot and raw2:
-                clip_b64, clip_note = _clip_screenshot_base64(raw2)
-                if clip_note:
-                    append_event(run_id, {"kind": "screenshot_omitted", "detail": clip_note[:300]})
+                screenshot_payload = _build_screenshot_payload(raw2)
+                _after_screenshot_built(screenshot_payload)
             if err2 is None and h2 is not None:
                 dom = domain_hints[0] if domain_hints else None
                 if dom:

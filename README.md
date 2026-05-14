@@ -22,7 +22,7 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 | `request_user_secret` | One-time **`submit_url`** on **`127.0.0.1`** only; operator pastes value in browser; stored encrypted (`SECRETS_MASTER_KEY`) |
 | `list_secrets` | Stored secret **names** (+ optional `created_at`); never values |
 | `revoke_secret` | Delete a stored secret by name (idempotent) |
-| `browser_task` | **Browser Use** + **DeepSeek** (`DEEPSEEK_API_KEY`); default **headless**, per-domain headed memory, one **headed** retry on bot/login-like signals; optional **`BROWSER_USER_DATA_DIR`** for persistent cookies; optional **`secret_prefill`** (https URLs + selectors + `secret_name`) fills locally before the agent so values are not sent to the LLM; returns **`run_id`** |
+| `browser_task` | **Browser Use** + **DeepSeek** (`DEEPSEEK_API_KEY`); default **headless**, per-domain headed memory, one **headed** retry on bot/login-like signals; optional **`BROWSER_USER_DATA_DIR`** for persistent cookies; optional **`secret_prefill`** (https URLs + selectors + `secret_name`) fills locally before the agent so values are not sent to the LLM; returns **`run_id`**; with **`return_screenshot`**, prefers **`screenshot_url`** when **`PUBLIC_MCP_BASE_URL`** is set (full PNG via GET, not huge base64 in JSON) |
 | `cursor_agent` | [Cursor Agent CLI](https://cursor.com/docs/cli/headless): **`capability_level`** 1=`ask`, 2=`plan` (default), 3=`agent`+`--force` only after **`approve_cursor_writes`** for that workspace; returns **`run_id`** |
 | `approve_cursor_writes` | Persist Level 3 (apply) for one workspace; set **`always_allow_level_3_rule=true`** for a durable “always allow” rule until **`revoke_cursor_writes`** |
 | `revoke_cursor_writes` | Remove Level 3 permission **and** any always-allow rule for a workspace |
@@ -33,6 +33,10 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 
 - **`AGENT_MEMORY_PATH`**: JSON file (default under `%LOCALAPPDATA%\grok-mcp-agent\memory.json`) storing Cursor write approvals, optional **`always_allow_level_3`** rules, per-domain headed/headless-ok prefs, and bounded recovery hints.
 - **`MCP_DISABLED_TOOLS`**: Comma-separated tool names rejected at call time (e.g. `browser_task,cursor_agent`). **`get_status`** is always allowed.
+
+### `browser_task` screenshots (`return_screenshot`)
+
+When **`PUBLIC_MCP_BASE_URL`** is set to the same **`https://…`** origin Grok already uses for MCP (your Funnel URL, no path), successful captures return **`screenshot_url`** pointing at **`GET /browser-screenshot/{token}`** — a **one-time** full PNG response so the model is not fed multi‑megabyte base64 inside tool JSON. Tokens expire after **`BROWSER_SCREENSHOT_URL_TTL_SECONDS`** (default 600). Anyone who obtains the URL can download the image until it is consumed or expires; treat links as sensitive. Set **`BROWSER_SCREENSHOT_INCLUDE_BASE64=true`** if you also want a clipped inline **`screenshot_base64`** (see **`BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS`**). Without **`PUBLIC_MCP_BASE_URL`**, behavior is inline base64 only (capped as before). **`get_status`** reports **`public_mcp_base_url_configured`**.
 
 ### Grok `allowed_tools`
 

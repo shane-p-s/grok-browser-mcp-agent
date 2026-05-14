@@ -16,7 +16,7 @@ if _env_path.is_file():
     load_dotenv(_env_path, override=False)
 
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
 from auth_middleware import BearerAuthMiddleware, validate_auth_token_at_startup
@@ -134,7 +134,31 @@ async def root(_):
             "health": "/health",
             "mcp": "/mcp/",
             "oauth_metadata": "/.well-known/oauth-authorization-server",
+            "browser_screenshot": "/browser-screenshot/{token} (GET; one-time PNG when PUBLIC_MCP_BASE_URL is set)",
         }
+    )
+
+
+async def browser_screenshot(request):
+    """Serve a one-time browser_task PNG; not Bearer-gated (opaque token + TTL)."""
+    import screenshot_serve as ss
+
+    token = (request.path_params.get("token") or "").strip()
+    ss.purge_expired()
+    path = ss.take_path_for_token(token)
+    if path is None:
+        return JSONResponse({"error": "not_found_or_expired"}, status_code=404)
+    try:
+        data = path.read_bytes()
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -146,6 +170,7 @@ async def lifespan(app: Starlette):
 
 routes = [
     Route("/", root, methods=["GET"]),
+    Route("/browser-screenshot/{token}", browser_screenshot, methods=["GET"]),
     Route("/health", health, methods=["GET"]),
     Route("/.well-known/oauth-authorization-server", oauth_metadata, methods=["GET"]),
     Route("/.well-known/oauth-authorization-server/", oauth_metadata, methods=["GET"]),
