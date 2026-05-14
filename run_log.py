@@ -16,8 +16,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
+_disk_lock = threading.Lock()
 _runs: dict[str, dict[str, Any]] = {}
 _recent_ids: deque[str] = deque()
+
+_DISK_LOG_NAME = "agent_events.ndjson"
 
 _MAX_EVENTS = int(os.getenv("AGENT_LOG_MAX_EVENTS_PER_RUN", "200"))
 _RETAIN_RUNS = int(os.getenv("AGENT_LOG_RETAIN_RUNS", "50"))
@@ -149,8 +152,14 @@ def _append_disk(record: dict[str, Any]) -> None:
         d = _default_log_dir()
         d.mkdir(parents=True, exist_ok=True)
         line = json.dumps(redact_value(record), default=str) + "\n"
+        path = d / _DISK_LOG_NAME
+        with _disk_lock:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
     except OSError as e:
         logger.warning("AGENT_LOG disk write failed: %s", e)
+    except (TypeError, ValueError) as e:
+        logger.warning("AGENT_LOG disk serialize failed: %s", e)
 
 
 def summarize_browser_history(history: Any) -> dict[str, Any]:
