@@ -19,5 +19,8 @@ if (Test-Path $envFile) {
 $bindHost = if ($env:HOST) { $env:HOST } else { "127.0.0.1" }
 $bindPort = if ($env:PORT) { $env:PORT } else { "8765" }
 
-Write-Host "Starting uvicorn on http://${bindHost}:${bindPort} (repo: $Root)"
-python -m uvicorn main:app --host $bindHost --port $bindPort
+$venvPython = Join-Path $Root ".venv\Scripts\python.exe"
+$pythonExe = if (Test-Path $venvPython) { $venvPython } else { "python" }
+
+Write-Host "Starting uvicorn on http://${bindHost}:${bindPort} (repo: $Root, python: $pythonExe)"
+& $pythonExe -m uvicorn main:app --host $bindHost --port $bindPort

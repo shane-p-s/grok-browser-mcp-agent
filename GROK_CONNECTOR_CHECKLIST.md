@@ -39,18 +39,25 @@ Per xAI documentation ([Remote MCP Tools](https://docs.x.ai/developers/tools/rem
 **Required for all MCP requests** under `/mcp/`:
 
 ```http
-Authorization: Bearer <AUTH_TOKEN>
+Authorization: Bearer <token>
 ```
 
-The server parses **`Authorization`**: scheme **`Bearer`** (case-insensitive), exactly **one space** after `Bearer`, then a **non-empty** token. The token must match **`AUTH_TOKEN`** (digest-based compare). Malformed headers return **401** with JSON **`detail`** describing the problem.
+The server parses **`Authorization`**: scheme **`Bearer`** (case-insensitive), exactly **one space** after `Bearer`, then a **non-empty** token.
+
+**Two accepted token types:**
+
+1. **Legacy static secret** — the token equals **`AUTH_TOKEN`** from the operator’s environment (digest-based compare).
+2. **OAuth access token** — when **`OAUTH_ENABLED=true`**, the operator runs this server’s **`/oauth/authorize`** + **`/oauth/token`** flow; the **`access_token`** returned there is a signed JWT also accepted as the Bearer value on `/mcp/`. Discovery: **`GET /.well-known/oauth-authorization-server`**. See [README.md](README.md) “Grok connector: OAuth”.
+
+At least one of **`AUTH_TOKEN`** or full OAuth config (**`OAUTH_CLIENT_ID`** + **`OAUTH_JWT_SECRET`**) must be set or `/mcp/` returns **503** (“misconfiguration”).
 
 **Common failure modes Grok should check:**
 
 1. **Missing `Bearer ` prefix or empty token** — **401** with a specific **`detail`** string. Fix: store **`Bearer <secret>`** in the connector authorization field when the client sends the header verbatim.
 2. **Wrong token** — **401** (`detail`: invalid bearer token).
-3. **Token not set on server** — If `AUTH_TOKEN` is empty, middleware returns **503** (“misconfiguration”).
+3. **Neither static nor OAuth configured on server** — **503** (“misconfiguration”).
 
-**Unauthenticated endpoints:** `GET /health`, `GET /` — used for liveness; **do not** rely on them for MCP.
+**Unauthenticated endpoints:** `GET /health`, `GET /`, **`/.well-known/oauth-authorization-server`**, **`/oauth/authorize`**, **`/oauth/token`** (POST) — used for liveness / OAuth; **`/mcp/`** requires Bearer as above.
 
 ---
 

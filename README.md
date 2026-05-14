@@ -40,10 +40,37 @@ Start with `ping`, `get_status`, then `fetch_url`, then expand. For **`cursor_ag
 
 ### Grok connector: `Authorization` header
 
-The server requires a valid **`Authorization: Bearer <token>`** header: scheme **`Bearer`** (case-insensitive), **one space**, then a **non-empty** token that matches **`AUTH_TOKEN`** (constant-time compare). Malformed headers return **401** with a JSON **`detail`** explaining the problem.
+The server requires a valid **`Authorization: Bearer <token>`** header: scheme **`Bearer`** (case-insensitive), **one space**, then a **non-empty** token. The token may be the legacy static **`AUTH_TOKEN`** or an **OAuth access JWT** from this server’s **`/oauth/token`** when **`OAUTH_ENABLED=true`** (see below). Malformed headers return **401** with a JSON **`detail`** explaining the problem.
 
 - If the Grok connector UI stores a **raw secret** and xAI sends **`Authorization: <secret>`** without the `Bearer ` prefix, requests will **401**. Fix by storing the full value **`Bearer <secret>`** in the connector’s authorization field **or** prefixing your secret accordingly.
 - If xAI already sends `Bearer <token>`, set the connector secret to **only** the token string (same as `AUTH_TOKEN` env).
+
+### Grok connector: OAuth (optional, for “OAuth Credentials” UI)
+
+When **`OAUTH_ENABLED=true`**, this app exposes a **small OAuth 2.0 surface** on the **same origin** as MCP (so your Funnel URL serves both):
+
+| Grok / xAI field | Value (replace host with your public base, no path) |
+|------------------|--------------------------------------------------------|
+| **Client ID** | Same as **`OAUTH_CLIENT_ID`** in `.env` |
+| **Client Secret** | Same as **`OAUTH_CLIENT_SECRET`** if you set one; leave empty in Grok if you use **PKCE-only** and did not set a server secret |
+| **Authorization Endpoint** | `https://<your-host>/oauth/authorize` |
+| **Token Endpoint** | `https://<your-host>/oauth/token` |
+| **Scopes** | Leave empty or use a placeholder scope name (this server does not require scopes) |
+| **Token Auth Method** | **PKCE only** works with **`authorization_code`**; if you set **`OAUTH_CLIENT_SECRET`**, Grok may send it on the token request and the server will validate it |
+
+Discovery (optional for clients): **`GET https://<your-host>/.well-known/oauth-authorization-server`**
+
+**`/mcp/`** accepts **`Authorization: Bearer …`** where the token is either the legacy **`AUTH_TOKEN`** or an **access JWT** returned by **`/oauth/token`**. You can keep **`AUTH_TOKEN`** set for local smoke tests (`scripts/smoke_mcp.py`) while Grok uses OAuth tokens.
+
+**Redirect URI allowlist:** Authorization codes only redirect to **`https`** URLs whose host matches **`OAUTH_REDIRECT_URI_HOST_SUFFIX`** (default **`.x.ai`**). If xAI uses another host, add it (comma-separated suffixes, or `*` to allow any `https` host — weaker).
+
+**Troubleshooting “Not Found” on the authorize page**
+
+1. **Restart the MCP server** after changing `.env` (old process has no `/oauth/authorize` route).
+2. Confirm **`OAUTH_ENABLED=true`** and **`OAUTH_CLIENT_ID`** / **`OAUTH_JWT_SECRET`** are set; if OAuth is off, you should now see **503** and a short HTML message instead of a bare 404.
+3. Open **`https://<your-host>/.well-known/oauth-authorization-server`** in a browser — you should get JSON (not HTML 404 from another layer).
+4. Use the **Funnel public URL** (same host as `/mcp/`), not a **tailnet-only** Serve URL on another port.
+5. **Client ID** in Grok must **exactly match** **`OAUTH_CLIENT_ID`** (no extra spaces).
 
 ### Connector handshake issues
 
@@ -57,6 +84,7 @@ copy .env.example .env
 # Edit .env: AUTH_TOKEN, DEEPSEEK_API_KEY, CURSOR_* as needed
 
 pip install -r requirements.txt
+python -m playwright install chromium
 python -m uvicorn main:app --host 127.0.0.1 --port 8765
 ```
 

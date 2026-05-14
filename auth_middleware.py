@@ -1,14 +1,18 @@
-"""Bearer token gate for the MCP Streamable HTTP mount."""
+"""Bearer token gate for the MCP Streamable HTTP mount.
+
+Accepts either a static AUTH_TOKEN (legacy / smoke tests) or an OAuth access JWT
+issued by this app's /oauth/token when OAUTH_ENABLED=true.
+"""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import os
 from collections.abc import Awaitable, Callable
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+from oauth_routes import mcp_auth_configured, verify_mcp_access_token
 
 
 def is_production() -> bool:
@@ -24,10 +28,11 @@ def expected_bearer_token() -> str | None:
 
 
 def validate_auth_token_at_startup() -> None:
-    """Fail fast on Cloud Run if AUTH_TOKEN is missing."""
-    if is_production() and not expected_bearer_token():
+    """Fail fast in production if neither static nor OAuth MCP auth is configured."""
+    if is_production() and not mcp_auth_configured():
         raise RuntimeError(
-            "AUTH_TOKEN must be set when running on Cloud Run (K_SERVICE) or ENVIRONMENT=production."
+            "Set AUTH_TOKEN and/or enable OAuth (OAUTH_ENABLED=true with OAUTH_CLIENT_ID and OAUTH_JWT_SECRET) "
+            "when running on Cloud Run (K_SERVICE) or ENVIRONMENT=production."
         )
 
 
@@ -53,24 +58,19 @@ def _parse_bearer(authorization_header: str | None) -> tuple[str | None, str | N
 
 
 class BearerAuthMiddleware:
-    """ASGI wrapper: require Authorization: Bearer <AUTH_TOKEN> for all requests."""
+    """ASGI wrapper: require Authorization: Bearer <AUTH_TOKEN or OAuth JWT> for all requests."""
 
-    def __init__(
-        self,
-        app: Callable[..., Awaitable[None]],
-        token: str | None,
-    ) -> None:
+    def __init__(self, app: Callable[..., Awaitable[None]]):
         self.app = app
-        self._token = token
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        if self._token is None:
+        if not mcp_auth_configured():
             resp = JSONResponse(
-                {"detail": "Server misconfiguration: AUTH_TOKEN is not set."},
+                {"detail": "Server misconfiguration: set AUTH_TOKEN and/or OAUTH_ENABLED with OAUTH_CLIENT_ID and OAUTH_JWT_SECRET."},
                 status_code=503,
             )
             await resp(scope, receive, send)
@@ -83,9 +83,7 @@ class BearerAuthMiddleware:
             await resp(scope, receive, send)
             return
 
-        p_hash = hashlib.sha256(presented.encode("utf-8")).hexdigest()
-        e_hash = hashlib.sha256(self._token.encode("utf-8")).hexdigest()
-        if not hmac.compare_digest(p_hash, e_hash):
+        if not verify_mcp_access_token(presented):
             resp = JSONResponse({"detail": "Invalid bearer token"}, status_code=401)
             await resp(scope, receive, send)
             return

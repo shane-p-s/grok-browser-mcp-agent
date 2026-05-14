@@ -22,6 +22,7 @@ import secrets_store
 import secrets_submit
 import tool_gating
 from cursor_agent_tools import register_cursor_tools
+from oauth_routes import mcp_auth_configured, oauth_auth_configured
 from github_tools import (
     github_get_diff as github_compare_api,
     github_get_file_enriched,
@@ -230,6 +231,8 @@ def register_tools(mcp: FastMCP) -> None:
             "mcp_json_response": _mcp_json_response_flag(),
             "mcp_path": "/mcp/",
             "auth_token_configured": bool((os.getenv("AUTH_TOKEN") or "").strip()),
+            "oauth_auth_configured": oauth_auth_configured(),
+            "mcp_auth_configured": mcp_auth_configured(),
             "deepseek_configured": bool((os.getenv("DEEPSEEK_API_KEY") or "").strip()),
             "cursor_api_configured": bool((os.getenv("CURSOR_API_KEY") or "").strip()),
             "github_token_configured": bool((os.getenv("GITHUB_TOKEN") or "").strip()),

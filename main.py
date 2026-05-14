@@ -12,9 +12,16 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
-from auth_middleware import BearerAuthMiddleware, expected_bearer_token, validate_auth_token_at_startup
+from auth_middleware import BearerAuthMiddleware, validate_auth_token_at_startup
 from mcp.server.fastmcp import FastMCP
 from mcp_tools import register_tools
+from oauth_routes import (
+    log_oauth_boot_status,
+    oauth_authorize,
+    oauth_metadata,
+    oauth_token,
+    validate_oauth_at_startup,
+)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -49,7 +56,7 @@ def build_mcp() -> FastMCP:
 
 mcp_server = build_mcp()
 _mcp_asgi = mcp_server.streamable_http_app()
-_mcp_wrapped = BearerAuthMiddleware(_mcp_asgi, expected_bearer_token())
+_mcp_wrapped = BearerAuthMiddleware(_mcp_asgi)
 
 
 async def health(_):
@@ -68,6 +75,7 @@ async def root(_):
             "service": "grok-browser-mcp-agent",
             "health": "/health",
             "mcp": "/mcp/",
+            "oauth_metadata": "/.well-known/oauth-authorization-server",
         }
     )
 
@@ -81,12 +89,20 @@ async def lifespan(app: Starlette):
 routes = [
     Route("/", root, methods=["GET"]),
     Route("/health", health, methods=["GET"]),
+    Route("/.well-known/oauth-authorization-server", oauth_metadata, methods=["GET"]),
+    Route("/.well-known/oauth-authorization-server/", oauth_metadata, methods=["GET"]),
+    Route("/oauth/authorize", oauth_authorize, methods=["GET"]),
+    Route("/oauth/authorize/", oauth_authorize, methods=["GET"]),
+    Route("/oauth/token", oauth_token, methods=["POST"]),
+    Route("/oauth/token/", oauth_token, methods=["POST"]),
     Mount("/mcp", app=_mcp_wrapped),
 ]
 
 app = Starlette(routes=routes, lifespan=lifespan)
 
+validate_oauth_at_startup()
 validate_auth_token_at_startup()
+log_oauth_boot_status()
 
 if __name__ == "__main__":
     import uvicorn
