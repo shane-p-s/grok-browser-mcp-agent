@@ -138,6 +138,7 @@ If Grok’s connector **fails initialization** or hangs, operator should try tog
 | TLS errors | HTTPS cert not provisioned for tailnet / misconfigured Funnel |
 | Connection refused | Uvicorn not running, wrong local port, or Funnel not pointed at `127.0.0.1:PORT` |
 | 401 on `/mcp/` | Wrong `AUTH_TOKEN`, malformed `Authorization`, or missing `Bearer ` / empty token (see JSON **`detail`**) |
+| 421 on `/mcp/` / log `Invalid Host header: *.ts.net` | Set **`MCP_EXTRA_ALLOWED_HOSTS`** to your Funnel hostname (see repo README); MCP SDK DNS rebinding protection vs. public `Host` header |
 | 503 on `/mcp/` | `AUTH_TOKEN` unset on server |
 | 307 then 401 | Use **`/mcp/`** with trailing slash; verify `Authorization` on final request |
 | MCP parse errors | Not hitting real MCP endpoint; wrong path |

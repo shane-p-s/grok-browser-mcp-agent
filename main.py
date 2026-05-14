@@ -21,6 +21,7 @@ from starlette.routing import Mount, Route
 
 from auth_middleware import BearerAuthMiddleware, validate_auth_token_at_startup
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp_tools import register_tools
 from oauth_routes import (
     log_oauth_boot_status,
@@ -41,6 +42,55 @@ def _json_response_flag() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _parse_mcp_extra_host_token(part: str) -> str | None:
+    """Hostname (or host:port) for MCP SDK Host allowlist; accepts optional https:// prefix."""
+    s = part.strip()
+    if not s:
+        return None
+    low = s.lower()
+    for prefix in ("https://", "http://"):
+        if low.startswith(prefix):
+            s = s[len(prefix) :]
+            break
+    s = s.split("/", maxsplit=1)[0].strip()
+    if not s or any(c in s for c in " \t\r\n"):
+        return None
+    return s
+
+
+def _mcp_transport_security_from_env() -> TransportSecuritySettings | None:
+    """
+    FastMCP enables DNS rebinding protection for localhost by default. Behind Tailscale Funnel,
+    clients send Host: <your-machine>.ts.net — add those via MCP_EXTRA_ALLOWED_HOSTS or POST /mcp/ returns 421.
+    """
+    off = (os.getenv("MCP_DNS_REBINDING_PROTECTION") or "").strip().lower()
+    if off in ("0", "false", "no", "off"):
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+    extra_raw = (os.getenv("MCP_EXTRA_ALLOWED_HOSTS") or "").strip()
+    if not extra_raw:
+        return None
+
+    allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    allowed_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+    for part in extra_raw.split(","):
+        h = _parse_mcp_extra_host_token(part)
+        if not h:
+            continue
+        allowed_hosts.append(h)
+        allowed_hosts.append(f"{h}:*")
+        allowed_origins.append(f"https://{h}")
+        allowed_origins.append(f"https://{h}:*")
+        allowed_origins.append(f"http://{h}")
+        allowed_origins.append(f"http://{h}:*")
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 def build_mcp() -> FastMCP:
     mcp = FastMCP(
         "grok-browser-mcp-agent",
@@ -56,6 +106,7 @@ def build_mcp() -> FastMCP:
         stateless_http=True,
         json_response=_json_response_flag(),
         streamable_http_path="/",
+        transport_security=_mcp_transport_security_from_env(),
     )
     register_tools(mcp)
     return mcp

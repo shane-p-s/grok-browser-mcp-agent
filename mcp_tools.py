@@ -233,6 +233,11 @@ def register_tools(mcp: FastMCP) -> None:
             "auth_token_configured": bool((os.getenv("AUTH_TOKEN") or "").strip()),
             "oauth_auth_configured": oauth_auth_configured(),
             "mcp_auth_configured": mcp_auth_configured(),
+            "mcp_extra_allowed_hosts_configured": bool((os.getenv("MCP_EXTRA_ALLOWED_HOSTS") or "").strip()),
+            "mcp_dns_rebinding_protection_disabled": (os.getenv("MCP_DNS_REBINDING_PROTECTION") or "")
+            .strip()
+            .lower()
+            in ("0", "false", "no", "off"),
             "deepseek_configured": bool((os.getenv("DEEPSEEK_API_KEY") or "").strip()),
             "cursor_api_configured": bool((os.getenv("CURSOR_API_KEY") or "").strip()),
             "github_token_configured": bool((os.getenv("GITHUB_TOKEN") or "").strip()),

@@ -76,6 +76,8 @@ Discovery (optional for clients): **`GET https://<your-host>/.well-known/oauth-a
 
 If Grok fails against JSON-only MCP, set **`MCP_JSON_RESPONSE=false`** (SSE-capable) and restart.
 
+**HTTP 421 on `POST /mcp/` with log line `Invalid Host header: <your>.ts.net`:** The official MCP Streamable HTTP stack validates the **`Host`** header when the server is bound to localhost. Tailscale Funnel forwards with your public **`*.ts.net`** host. Set **`MCP_EXTRA_ALLOWED_HOSTS`** to that hostname (comma-separated if several), for example **`MCP_EXTRA_ALLOWED_HOSTS=your-machine.tail1234.ts.net`**, then restart. Alternatively **`MCP_DNS_REBINDING_PROTECTION=false`** disables the check entirely (weaker on untrusted networks). See [`.env.example`](.env.example).
+
 ## Run on Windows (recommended)
 
 ```powershell
@@ -147,7 +149,8 @@ Then set Grok’s connector URL to `https://<your-funnel-host>/mcp/` (with trail
 1. Run this MCP server on **`127.0.0.1:PORT`** (e.g. `8765`), e.g. **`.\start.ps1`** or uvicorn as above.
 2. Run Funnel so public **HTTPS** terminates at Tailscale and forwards to **`http://127.0.0.1:PORT`**.
 3. In Grok connectors, set **Server URL** to `https://<funnel-host>/mcp/` and configure **Authorization** per the [Authorization section](#grok-connector-authorization-header) above.
-4. Verify from **outside** the tailnet (e.g. cellular) that `initialize` works.
+4. Set **`MCP_EXTRA_ALLOWED_HOSTS=<funnel-host>`** in `.env` (same hostname Grok uses, no `https://`) so MCP requests are not rejected with **421** / `Invalid Host header` — see [Connector handshake issues](#connector-handshake-issues).
+5. Verify from **outside** the tailnet (e.g. cellular) that `initialize` works.
 
 **Binding rule:** keep the app on **localhost only**; do not listen on `0.0.0.0` on untrusted networks.
 
