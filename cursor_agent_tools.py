@@ -191,7 +191,7 @@ def register_cursor_tools(mcp: FastMCP) -> None:
         if wants_force and not memory_store.is_cursor_write_allowed(str(ws_resolved)):
             return {
                 "error": "capability_level_3_not_approved",
-                "hint": "Call approve_cursor_writes with this workspace_path first, or use capability_level=2 (plan) / 1 (ask).",
+                "hint": "Call approve_cursor_writes (optionally always_allow_level_3_rule=true) for this workspace_path first, or use capability_level=2 (plan) / 1 (ask).",
                 "workspace": str(ws_resolved),
             }
 
