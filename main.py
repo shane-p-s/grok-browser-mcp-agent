@@ -7,6 +7,13 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+_env_path = Path(__file__).resolve().parent / ".env"
+if _env_path.is_file():
+    load_dotenv(_env_path, override=False)
 
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse

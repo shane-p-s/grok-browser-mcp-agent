@@ -38,7 +38,7 @@ def _oauth_disabled_response(request: Request, *, for_browser: bool) -> JSONResp
     """503 so clients do not confuse OAuth-off with 'route missing' (404)."""
     msg = (
         "OAuth is not enabled on this server. Set OAUTH_ENABLED=true, OAUTH_CLIENT_ID, and OAUTH_JWT_SECRET "
-        "in .env, then restart uvicorn/start.ps1."
+        "in .env next to main.py, then restart uvicorn/start.ps1. The app loads that file automatically on startup (python-dotenv)."
     )
     if for_browser and _wants_html(request):
         return HTMLResponse(
