@@ -111,6 +111,7 @@ Defaults: **`HOST=127.0.0.1`** in [`main.py`](main.py) `__main__` when using env
 - Default is **headless**. Per-domain memory may switch to **headed** after friction or operator preference.
 - Env **`BROWSER_HEADED=true`** or per-call **`headed=true`** still apply when no domain memory overrides.
 - **`BROWSER_USER_DATA_DIR`**: optional Playwright user-data dir for **persistent cookies** across `browser_task` runs (create the directory beforehand or let the server create it).
+- **`browser_task(..., return_screenshot=true)`**: last step’s viewport PNG is returned as **`screenshot_base64`** (capped by **`BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS`**, default 700k chars) for multimodal clients (e.g. Grok) to inspect; **`screenshot_note`** explains omission.
 - **Headed automation needs an interactive logged-in Windows session.** Lock screen or another user’s session often breaks Playwright/Chromium UI.
 
 ### Run logs (for Grok debugging)

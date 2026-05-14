@@ -161,6 +161,14 @@ def _secrets_misconfigured_response() -> dict[str, Any]:
     }
 
 
+def _clip_screenshot_base64(b64: str) -> tuple[str | None, str | None]:
+    """Cap screenshot payload size for MCP clients. Returns (data, None) or (None, reason)."""
+    max_chars = int(os.getenv("BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS", "700000"))
+    if max_chars <= 0 or len(b64) <= max_chars:
+        return b64, None
+    return None, f"screenshot_too_large_base64_chars={len(b64)}_max={max_chars}"
+
+
 async def _browser_run_once(
     task: str,
     model: str,
@@ -169,7 +177,9 @@ async def _browser_run_once(
     use_vision: bool,
     headed_eff: bool,
     user_data_dir: str | None,
-) -> tuple[Any | None, BaseException | None]:
+    *,
+    return_screenshot: bool = False,
+) -> tuple[Any | None, BaseException | None, str | None]:
     from browser_use import Agent, BrowserSession
     from browser_use.llm.deepseek.chat import ChatDeepSeek
 
@@ -194,11 +204,26 @@ async def _browser_run_once(
         use_vision=use_vision,
         enable_signal_handler=False,
     )
+    raw_b64: list[str | None] = [None]
+
+    async def on_step_end(a: Any) -> None:
+        if not return_screenshot:
+            return
+        try:
+            snaps = a.history.screenshots(n_last=1, return_none_if_not_screenshot=True)
+            if snaps and snaps[-1]:
+                raw_b64[0] = snaps[-1]
+        except Exception:
+            logger.debug("browser_task on_step_end screenshot failed", exc_info=True)
+
     try:
-        history = await asyncio.wait_for(agent.run(max_steps=ms), timeout=float(to))
-        return history, None
+        history = await asyncio.wait_for(
+            agent.run(max_steps=ms, on_step_end=on_step_end),
+            timeout=float(to),
+        )
+        return history, None, raw_b64[0]
     except BaseException as e:
-        return None, e
+        return None, e, raw_b64[0]
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -445,6 +470,7 @@ def register_tools(mcp: FastMCP) -> None:
         use_reasoner: bool = False,
         llm_model: str | None = None,
         secret_prefill: list[Any] | None = None,
+        return_screenshot: bool = False,
     ) -> dict[str, Any]:
         """
         Run a natural-language web automation task using Browser Use with DeepSeek (OpenAI-compatible API).
@@ -455,6 +481,11 @@ def register_tools(mcp: FastMCP) -> None:
         Optional secret_prefill: list of {url, fills:[{selector, secret_name}]} — Playwright fills secrets
         locally before the agent runs so values are not sent to the LLM. URLs must be https://. Never put
         raw secret values in task (task is sent to DeepSeek); reference stored names only.
+
+        If return_screenshot=true, the last step's viewport screenshot is included as screenshot_base64 (PNG)
+        when available, capped by BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS (default 700000). Grok (or other
+        multimodal clients) can use it for closed-loop steering. DeepSeek inside browser-use may still disable
+        use_vision for model names containing "deepseek".
         """
         if (g := tool_gating.tool_disabled_error("browser_task")) is not None:
             return g
@@ -507,6 +538,7 @@ def register_tools(mcp: FastMCP) -> None:
             "domain_hints": domain_hints,
             "user_data_dir": bool(user_data),
             "secret_prefill": bool(prefill),
+            "return_screenshot": return_screenshot,
         }
         if prefill:
             run_meta["secret_prefill_summary"] = _secret_prefill_summary(prefill)
@@ -534,9 +566,34 @@ def register_tools(mcp: FastMCP) -> None:
 
         append_event(run_id, {"kind": "agent_created"})
 
-        history, err = await _browser_run_once(
-            task.strip(), model, ms, float(to), use_vision, headed_eff, user_data
+        clip_b64: str | None = None
+        clip_note: str | None = None
+
+        def _merge_shot(out: dict[str, Any]) -> dict[str, Any]:
+            if not return_screenshot:
+                return out
+            r = dict(out)
+            if clip_b64:
+                r["screenshot_base64"] = clip_b64
+                r["screenshot_mime"] = "image/png"
+            if clip_note:
+                r["screenshot_note"] = clip_note
+            return r
+
+        history, err, raw_shot = await _browser_run_once(
+            task.strip(),
+            model,
+            ms,
+            float(to),
+            use_vision,
+            headed_eff,
+            user_data,
+            return_screenshot=return_screenshot,
         )
+        if return_screenshot and raw_shot:
+            clip_b64, clip_note = _clip_screenshot_base64(raw_shot)
+            if clip_note:
+                append_event(run_id, {"kind": "screenshot_omitted", "detail": clip_note[:300]})
 
         headed_retry = False
         ms2 = max(1, ms - 10)
@@ -574,7 +631,7 @@ def register_tools(mcp: FastMCP) -> None:
                 "success",
                 {"last_url": last_url, "final_result_preview": str(final)[:500] if final else None},
             )
-            return {
+            d = {
                 "run_id": run_id,
                 "success": True,
                 "final_result": final,
@@ -586,20 +643,29 @@ def register_tools(mcp: FastMCP) -> None:
                 "headed_retry": retry,
                 "domain_hints": domain_hints,
             }
+            if return_screenshot:
+                if clip_b64:
+                    d["screenshot_base64"] = clip_b64
+                    d["screenshot_mime"] = "image/png"
+                if clip_note:
+                    d["screenshot_note"] = clip_note
+            return d
 
         if isinstance(err, asyncio.TimeoutError):
             append_event(run_id, {"kind": "error", "name": "TimeoutError"})
             finish_run(run_id, "timeout", {"timeout_seconds": to, "max_steps": ms})
-            return {
-                "run_id": run_id,
-                "error": "timeout",
-                "timeout_seconds": to,
-                "max_steps": ms,
-                "hint": "Retry with a narrower task or higher timeout_seconds (up to 900).",
-                "headed": headed_eff,
-                "headed_retry": False,
-                "domain_hints": domain_hints,
-            }
+            return _merge_shot(
+                {
+                    "run_id": run_id,
+                    "error": "timeout",
+                    "timeout_seconds": to,
+                    "max_steps": ms,
+                    "hint": "Retry with a narrower task or higher timeout_seconds (up to 900).",
+                    "headed": headed_eff,
+                    "headed_retry": False,
+                    "domain_hints": domain_hints,
+                }
+            )
 
         if err is not None:
             err_s = str(err)
@@ -611,9 +677,20 @@ def register_tools(mcp: FastMCP) -> None:
                     {"kind": "headed_retry", "reason": "error_signals", "note": "high_impact: headed retry"},
                 )
                 headed_retry = True
-                h2, err2 = await _browser_run_once(
-                    task.strip(), model, ms2, float(to), use_vision, True, user_data
+                h2, err2, raw2 = await _browser_run_once(
+                    task.strip(),
+                    model,
+                    ms2,
+                    float(to),
+                    use_vision,
+                    True,
+                    user_data,
+                    return_screenshot=return_screenshot,
                 )
+                if return_screenshot and raw2:
+                    clip_b64, clip_note = _clip_screenshot_base64(raw2)
+                    if clip_note:
+                        append_event(run_id, {"kind": "screenshot_omitted", "detail": clip_note[:300]})
                 if err2 is None and h2 is not None:
                     memory_store.append_failure_hint(
                         "browser_task",
@@ -629,14 +706,16 @@ def register_tools(mcp: FastMCP) -> None:
                 )
             logger.exception("browser_task failed")
             finish_run(run_id, "error", {"error": type(err).__name__})
-            return {
-                "run_id": run_id,
-                "error": type(err).__name__,
-                "message": err_s[:2000],
-                "headed": headed_eff,
-                "headed_retry": headed_retry,
-                "domain_hints": domain_hints,
-            }
+            return _merge_shot(
+                {
+                    "run_id": run_id,
+                    "error": type(err).__name__,
+                    "message": err_s[:2000],
+                    "headed": headed_eff,
+                    "headed_retry": headed_retry,
+                    "domain_hints": domain_hints,
+                }
+            )
 
         assert history is not None
         final = None
@@ -656,9 +735,20 @@ def register_tools(mcp: FastMCP) -> None:
                 {"kind": "headed_retry", "reason": "result_signals", "note": "high_impact: headed retry"},
             )
             headed_retry = True
-            h2, err2 = await _browser_run_once(
-                task.strip(), model, ms2, float(to), use_vision, True, user_data
+            h2, err2, raw2 = await _browser_run_once(
+                task.strip(),
+                model,
+                ms2,
+                float(to),
+                use_vision,
+                True,
+                user_data,
+                return_screenshot=return_screenshot,
             )
+            if return_screenshot and raw2:
+                clip_b64, clip_note = _clip_screenshot_base64(raw2)
+                if clip_note:
+                    append_event(run_id, {"kind": "screenshot_omitted", "detail": clip_note[:300]})
             if err2 is None and h2 is not None:
                 dom = domain_hints[0] if domain_hints else None
                 if dom:
