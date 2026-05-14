@@ -86,7 +86,7 @@ Defaults: **`HOST=127.0.0.1`** in [`main.py`](main.py) `__main__` when using env
 
 - **`browser_task`** and **`cursor_agent`** return a **`run_id`** (UUID).
 - Call **`list_recent_runs`** then **`get_run_log(run_id)`** for redacted timelines (URLs, action class names, exit codes). Not a dump of DeepSeek internal chain-of-thought.
-- Env: **`AGENT_LOG_ENABLE_DISK`**, **`AGENT_LOG_DIR`**, **`AGENT_LOG_MAX_EVENTS_PER_RUN`**, **`AGENT_LOG_RETAIN_RUNS`**, **`AGENT_LOG_MAX_RESPONSE_CHARS`** (see [`.env.example`](.env.example)).
+- Env: **`AGENT_LOG_ENABLE_DISK`**, **`AGENT_LOG_DIR`** (disk JSONL: **`agent_events.ndjson`** when enabled), **`AGENT_LOG_MAX_EVENTS_PER_RUN`**, **`AGENT_LOG_RETAIN_RUNS`**, **`AGENT_LOG_MAX_RESPONSE_CHARS`** (see [`.env.example`](.env.example)).
 
 ### Smoke test
 

@@ -13,7 +13,7 @@
 ### Run logs (Grok debugging)
 
 - Module **[`run_log.py`](run_log.py)** records **bounded**, **redacted** events per **`run_id`** for **`browser_task`** and **`cursor_agent`**.
-- **`list_recent_runs`** / **`get_run_log`** MCP tools read from an in-memory ring buffer; optional **JSONL** append to **`AGENT_LOG_DIR`** when **`AGENT_LOG_ENABLE_DISK=true`**.
+- **`list_recent_runs`** / **`get_run_log`** MCP tools read from an in-memory ring buffer; optional **JSONL** append to **`AGENT_LOG_DIR/agent_events.ndjson`** when **`AGENT_LOG_ENABLE_DISK=true`**.
 - Logs intentionally **exclude** model chain-of-thought; they focus on URLs, action class names, exit codes, and errors.
 
 ### Data flow
@@ -38,7 +38,7 @@ flowchart LR
 ### Non-goals (current repo)
 
 - No pixel-level remote control of the Cursor UI.
-- No built-in credential vault; use **`allowed_tools`**, **`MCP_DISABLED_TOOLS`**, **`approve_cursor_writes`** / **`always_allow_level_3_rule`**, and operational discipline.
+- **Secrets**: do not put raw credentials in the **`browser_task`** **`task`** text (it is sent to the LLM). Use **encrypted local storage** ([`secrets_store.py`](secrets_store.py), MCP **`request_user_secret`** / **`list_secrets`** / **`revoke_secret`**, optional **`secret_prefill`**) plus **`allowed_tools`**, **`MCP_DISABLED_TOOLS`**, and **`approve_cursor_writes`** / **`always_allow_level_3_rule`** — not a managed cloud vault or HSM.
 
 ### Legacy
 

@@ -13,7 +13,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py auth_middleware.py mcp_tools.py cursor_agent_tools.py run_log.py ./
+# All server modules (wildcard avoids stale COPY list when new tools are added).
+COPY *.py ./
 
 EXPOSE 8080
 

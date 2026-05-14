@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import secrets as std_secrets
 import threading
 import time
@@ -11,6 +12,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import secrets_store
+
+logger = logging.getLogger(__name__)
 
 _MAX_CONCURRENT = 2
 _server_lock = threading.Lock()
@@ -90,7 +93,12 @@ def start_secret_submit_server(
             if path != f"/submit/{token}":
                 self._send(404, b"Not found")
                 return
-            length = int(self.headers.get("Content-Length") or 0)
+            raw_cl = (self.headers.get("Content-Length") or "0").strip()
+            try:
+                length = int(raw_cl)
+            except ValueError:
+                self._send(400, b"Bad content length header")
+                return
             if length <= 0 or length > 256_000:
                 self._send(400, b"Bad content length")
                 return
@@ -132,8 +140,8 @@ def start_secret_submit_server(
 
             threading.Thread(target=shutdown_after_ttl, daemon=True).start()
             srv.serve_forever()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("secret submit HTTP server failed: %s", e)
         finally:
             global _active_count
             with _server_lock:
