@@ -1,13 +1,19 @@
-FROM python:3.11-slim
+# OPTIONAL: container image for Linux dev / parity. Primary deployment is native Windows + Funnel.
+# Playwright base image includes Chromium + OS deps for browser-use.
+FROM mcr.microsoft.com/playwright/python:v1.58.0-jammy
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y wget gnupg && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    IN_DOCKER=true \
+    BROWSER_USE_SETUP_LOGGING=false \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY main.py auth_middleware.py mcp_tools.py cursor_agent_tools.py run_log.py ./
 
 EXPOSE 8080
 
