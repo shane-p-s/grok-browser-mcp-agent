@@ -170,14 +170,18 @@ async def _browser_run_once(
     headed_eff: bool,
     user_data_dir: str | None,
 ) -> tuple[Any | None, BaseException | None]:
-    from browser_use import Agent, BrowserSession, ChatOpenAI
+    from browser_use import Agent, BrowserSession
+    from browser_use.llm.deepseek.chat import ChatDeepSeek
 
     api_key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
-    llm = ChatOpenAI(
+    # ChatOpenAI + DeepSeek returns 400: "This response_format type is unavailable now" — browser_use
+    # expects structured steps; ChatDeepSeek uses tool-calling instead of OpenAI json_schema response_format.
+    base_url = (os.getenv("DEEPSEEK_BASE_URL") or "").strip() or "https://api.deepseek.com/v1"
+    llm = ChatDeepSeek(
         model=model,
-        base_url="https://api.deepseek.com",
         api_key=api_key,
         temperature=0.2,
+        base_url=base_url,
     )
     bs_kwargs: dict[str, Any] = {"headless": not headed_eff}
     if user_data_dir:

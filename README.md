@@ -107,6 +107,7 @@ Defaults: **`HOST=127.0.0.1`** in [`main.py`](main.py) `__main__` when using env
 
 ### Browser headed mode
 
+- **`browser_task`** uses browser-use’s **`ChatDeepSeek`** for DeepSeek (not `ChatOpenAI` against `api.deepseek.com`). That avoids DeepSeek **400** errors like **`This response_format type is unavailable now`**, which occur when an OpenAI-style **`response_format` / JSON schema** request is sent to DeepSeek. Optional override: **`DEEPSEEK_BASE_URL`** (default **`https://api.deepseek.com/v1`**). Browser-use may still log that **DeepSeek does not support `use_vision=true`** and fall back to non-vision for those models.
 - Default is **headless**. Per-domain memory may switch to **headed** after friction or operator preference.
 - Env **`BROWSER_HEADED=true`** or per-call **`headed=true`** still apply when no domain memory overrides.
 - **`BROWSER_USER_DATA_DIR`**: optional Playwright user-data dir for **persistent cookies** across `browser_task` runs (create the directory beforehand or let the server create it).
