@@ -14,10 +14,12 @@ Remote **`GET /health`** only proves **something** answered on the funnel URL; *
 
 - **PC asleep or lid closed** — Windows suspends; Tailscale + Funnel + uvicorn stop serving. Use **never sleep on AC** (or keep the machine awake) when this PC is your MCP relay.
 - **Tailscale disconnected** — funnel endpoints go away or flap. Check Tailscale on the PC is **Connected**.
-- **Uvicorn exited or wedged** — run **`.\stop.ps1`** then **`.\start.ps1`**. **`stop.ps1`** kills whatever is **LISTEN**ing on **`PORT`** (default **8765**) when **Ctrl+C** does not work.
+- **Uvicorn exited or wedged** — run **`restart-mcp.bat`** (stops then starts; pin it to the taskbar) or **`.\stop.ps1`** then **`.\start.ps1`**. **`stop.ps1`** kills whatever is **LISTEN**ing on **`PORT`** (default **8765**) when **Ctrl+C** does not work.
+
+**One-click restart (pin to taskbar):** in the repo folder, use **`restart-mcp.bat`**. Right‑click it → **Show more options** → **Pin to taskbar** (Windows 10/11), or create a shortcut to **`restart-mcp.bat`** and pin the shortcut. No need to `cd` manually; scripts use their own folder.
 - **`browser_task` load** — long runs + Playwright/Chrome can stress RAM; orphan Chromium after a force-kill may linger. Close extra Chrome windows; lower **`BROWSER_TASK_MAX_CONCURRENT`** if needed.
 
-**`Ctrl+C` on Windows** sometimes does not stop uvicorn (focus, console host, or blocked process). Prefer **`.\stop.ps1`** or closing the window after **`stop.ps1`**.
+**`Ctrl+C` on Windows** sometimes does not stop uvicorn (focus, console host, or blocked process). Prefer **`restart-mcp.bat`**, **`.\stop.ps1`**, or closing the window after **`stop.ps1`**.
 
 ## Transport (MCP Python SDK)
 
