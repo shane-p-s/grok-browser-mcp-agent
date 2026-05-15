@@ -4,6 +4,8 @@
 
 Use the connector URL **`https://<your-funnel-host>/mcp/`** with a **trailing slash** so some clients do not strip `Authorization` on a `307` redirect.
 
+**Reference docs:** **[`ARCHITECTURE.md`](ARCHITECTURE.md)** (browser hub, screenshot route), **[`GROK_CONNECTOR_CHECKLIST.md`](GROK_CONNECTOR_CHECKLIST.md)** (Grok: `browser_task` / tabs / screenshots parameters).
+
 ## Transport (MCP Python SDK)
 
 This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](https://github.com/modelcontextprotocol/python-sdk) PyPI package** with **`streamable_http_app()`** (Streamable HTTP / stateless HTTP). Internally the same package wires **`StreamableHTTPSessionManager`** to the low-level **`mcp.server.lowlevel.server.Server`** (`MCPServer`). FastMCP is the **maintained facade** for tool registration and schemas; the wire protocol is the same as calling `streamable_http_app()` through that stack. A future refactor could drop the FastMCP import only if you replace tool registration with explicit `@server.list_tools` / `@server.call_tool` handlers (large change).
@@ -22,7 +24,9 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 | `request_user_secret` | One-time **`submit_url`** on **`127.0.0.1`** only; operator pastes value in browser; stored encrypted (`SECRETS_MASTER_KEY`) |
 | `list_secrets` | Stored secret **names** (+ optional `created_at`); never values |
 | `revoke_secret` | Delete a stored secret by name (idempotent) |
-| `browser_task` | **Browser Use** + **DeepSeek** (`DEEPSEEK_API_KEY`); default **headless**, per-domain headed memory, one **headed** retry on bot/login-like signals; optional **`BROWSER_USER_DATA_DIR`** for persistent cookies; optional **`secret_prefill`** (https URLs + selectors + `secret_name`) fills locally before the agent so values are not sent to the LLM; returns **`run_id`**; with **`return_screenshot`**, prefers **`screenshot_url`** when **`PUBLIC_MCP_BASE_URL`** is set (full PNG via GET, not huge base64 in JSON) |
+| `browser_task` | **Browser Use** + **DeepSeek** (`DEEPSEEK_API_KEY`); default **headless**, per-domain memory; optional **headed** retry; **`secret_prefill`** / **`BROWSER_USER_DATA_DIR`** as before; **shared Chrome** — new tab or **`continue_tab_id`**, optional **`tab_label`**; **`return_screenshot=true`** + **`PUBLIC_MCP_BASE_URL`** → **`screenshot_url`**; see sections below |
+| `list_browser_tabs` | Open automation tabs: **`tab_id`**, **`label`**, **`status`**, **`url`**, **`title`** |
+| `close_browser_tab` | Close a tab by **`tab_id`** |
 | `cursor_agent` | [Cursor Agent CLI](https://cursor.com/docs/cli/headless): **`capability_level`** 1=`ask`, 2=`plan` (default), 3=`agent`+`--force` only after **`approve_cursor_writes`** for that workspace; returns **`run_id`** |
 | `approve_cursor_writes` | Persist Level 3 (apply) for one workspace; set **`always_allow_level_3_rule=true`** for a durable “always allow” rule until **`revoke_cursor_writes`** |
 | `revoke_cursor_writes` | Remove Level 3 permission **and** any always-allow rule for a workspace |
@@ -121,7 +125,7 @@ Defaults: **`HOST=127.0.0.1`** in [`main.py`](main.py) `__main__` when using env
 - Default is **headless**. Per-domain memory may switch to **headed** after friction or operator preference.
 - Env **`BROWSER_HEADED=true`** or per-call **`headed=true`** still apply when no domain memory overrides.
 - **`BROWSER_USER_DATA_DIR`**: optional Playwright user-data dir for **persistent cookies** across `browser_task` runs (create the directory beforehand or let the server create it).
-- **`browser_task(..., return_screenshot=true)`**: last step’s viewport PNG is returned as **`screenshot_base64`** (capped by **`BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS`**, default 700k chars) for multimodal clients (e.g. Grok) to inspect; **`screenshot_note`** explains omission.
+- **`browser_task(..., return_screenshot=true)`** with **`PUBLIC_MCP_BASE_URL`**: prefer **`screenshot_url`** (HTTPS one-time GET for full PNG). Without public base, or with **`BROWSER_SCREENSHOT_INCLUDE_BASE64`**, may return capped **`screenshot_base64`**; **`screenshot_note`** explains omission.
 - **Headed automation needs an interactive logged-in Windows session.** Lock screen or another user’s session often breaks Playwright/Chromium UI.
 
 ### Run logs (for Grok debugging)

@@ -102,7 +102,9 @@ Exact names (for `allowed_tools` in Grok):
 | `request_user_secret` | Localhost-only one-time form URL; operator submits secret; encrypted at rest (`SECRETS_MASTER_KEY`) |
 | `list_secrets` | Names (+ optional `created_at`); never secret values |
 | `revoke_secret` | Delete stored secret by name (idempotent) |
-| `browser_task` | Browser Use + DeepSeek; headless-first, per-domain headed memory, optional headed retry; optional **`secret_prefill`** (https + selectors + secret names) fills on PC before agent; **`task`** must not contain raw secrets; returns **`run_id`** |
+| `browser_task` | Browser Use + DeepSeek; **shared Chrome**, **new tab per call** (or **`continue_tab_id`** to resume an **idle** tab); optional **`tab_label`** for listing; **`return_screenshot=true`** + operator **`PUBLIC_MCP_BASE_URL`** → **`screenshot_url`** (one-time HTTPS PNG); optional **`secret_prefill`**; **`task`** must not contain raw secrets; returns **`run_id`**, **`browser_tab_id`**, etc. |
+| `list_browser_tabs` | Open tabs from **`browser_task`**: **`tab_id`**, **`label`**, **`run_id`**, **`status`** (`running` / `idle`), **`url`**, **`title`** |
+| `close_browser_tab` | Close a tab by **`tab_id`** from **`list_browser_tabs`** or a prior **`browser_task`** result |
 | `cursor_agent` | Cursor `agent` CLI; levels **1=ask**, **2=plan (default)**, **3=agent+force** after **`approve_cursor_writes`** or durable rule; returns **`run_id`** |
 | `approve_cursor_writes` | Persist Level-3 permission; optional **`always_allow_level_3_rule`** for durable rule |
 | `revoke_cursor_writes` | Clear Level-3 permission **and** always-allow rule for one workspace path |
@@ -112,6 +114,19 @@ Exact names (for `allowed_tools` in Grok):
 **Operator memory file:** JSON at **`AGENT_MEMORY_PATH`** (default `%LOCALAPPDATA%\grok-mcp-agent\memory.json`) stores Cursor write approvals, optional **always-allow Level 3** rules, per-domain headed / headless-ok prefs, and bounded recovery hints.
 
 **Optional lockdown:** env **`MCP_DISABLED_TOOLS`** = comma-separated tool names to reject at **`tools/call`** time (e.g. `browser_task,cursor_agent`). **`get_status`** always runs.
+
+### `browser_task`: screenshots (what Grok should pass and expect)
+
+- **Parameters**
+  - **`return_screenshot`:** set to **`true`** whenever Grok needs a **PNG** of the final viewport. If omitted/false, the tool result has **no** `screenshot_url` / `screenshot_base64`.
+  - **`tab_label`:** optional short string (e.g. `"Amazon mens joggers"`) stored for **`list_browser_tabs`** / **`get_status`** → **`browser_tabs`**.
+  - **`continue_tab_id`:** optional; **`tab_id`** of an **idle** tab from **`list_browser_tabs`** or a prior result — **reuses that tab** instead of opening another (avoid duplicate navigation).
+- **Operator setup:** **`PUBLIC_MCP_BASE_URL`** = `https://<same-funnel-host-as-MCP>` (no path). Then **`get_status`** includes **`public_mcp_base_url_configured`** and a **`browser_tabs`** summary when tabs exist.
+- **Tool result (screenshot path)**  
+  - Prefer **`screenshot_url`**: HTTPS URL on the same host; **GET once** → full **PNG** binary (`Cache-Control: no-store`, token consumed or TTL). Grok (or the user) must **fetch that URL** to attach or view the image — the MCP JSON alone does not embed multi-megabyte pixels unless **`BROWSER_SCREENSHOT_INCLUDE_BASE64`** is enabled on the server.  
+  - May include **`screenshot_delivery`:** `"url_only_no_inline_base64"` when only the URL is returned.  
+  - **`screenshot_note`** if something was omitted or clipped.
+- **“Vision”:** DeepSeek inside browser-use still does **not** use vision for **`deepseek-*`** models (browser-use may log **`use_vision=False`**). Grok’s **multimodal** path is: call **`browser_task`** with **`return_screenshot=true`**, read **`screenshot_url`**, then **load the PNG** (HTTP GET) for analysis or to show the user — not a separate MCP tool after the fact.
 
 **Security guidance for Grok:** encourage the human to start with **`allowed_tools`** = `["ping","get_status","fetch_url"]`, then expand. **`cursor_agent`** Level **3** / `apply_changes=true` requires **`approve_cursor_writes`** or **`always_allow_level_3_rule`** for that workspace — high impact on disk when allowed.
 
@@ -161,10 +176,11 @@ Typical production shape:
 1. **GET** `/health` from public URL — expect JSON with `"status": "healthy"`.
 2. **POST** `/mcp/` `initialize` with JSON-RPC — expect **200** and a `result` object.
 3. **POST** `tools/list` — expect tool names including `ping`.
-4. **POST** `tools/call` `get_status` with `{}` — expect structured result with `tools` array and boolean capability flags (no raw secrets).
+4. **POST** `tools/call` `get_status` with `{}` — expect structured result with `tools` array and boolean capability flags (no raw secrets); may include **`browser_tabs`**, **`browser_hub_active`**, **`public_mcp_base_url_configured`** when browser/screenshot features are in use.
 5. **POST** `tools/call` `ping` — expect textual **`pong`** in content.
 6. **POST** `tools/call` `fetch_url` with `{"url":"https://example.com"}` — expect `status_code` **200** in structured result.
 7. Run **`browser_task`** or **`cursor_agent`** once, read returned **`run_id`**, then **`list_recent_runs`** and **`get_run_log`** — expect redacted event arrays (no secrets).
+8. For screenshots: run **`browser_task`** with **`return_screenshot=true`** (operator must set **`PUBLIC_MCP_BASE_URL`**); expect **`screenshot_url`** in the result, then **GET** that URL once for the PNG. Optional: **`list_browser_tabs`** after a run to see **`tab_id`** / **`label`** / **`idle`** tabs; **`continue_tab_id`** on a follow-up task reuses a tab.
 
 ---
 
