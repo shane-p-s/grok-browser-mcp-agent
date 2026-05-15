@@ -97,7 +97,7 @@ def build_mcp() -> FastMCP:
         instructions=(
             "Remote tools: ping, fetch_url, github_get_file (ref=branch/tag/SHA + content_text), github_list_repo_files, "
             "github_get_diff, github_create_issue, request_user_secret (127.0.0.1 form on PC), list_secrets, revoke_secret, "
-            "browser_task (optional secret_prefill for local Playwright fill before agent; never put raw secrets in task), "
+            "browser_task (shared Chrome; default new tab; continue_tab_id resumes idle tab; list_browser_tabs/get_status show open tabs+labels; close_browser_tab), "
             "cursor_agent (levels 1/2/3; approve_cursor_writes with optional always_allow_level_3_rule), revoke_cursor_writes, "
             "get_status, get_run_log, list_recent_runs. "
             "Streamable HTTP: FastMCP wraps official mcp MCPServer + StreamableHTTPSessionManager (same transport as streamable_http_app). "

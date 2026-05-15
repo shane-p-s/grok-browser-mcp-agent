@@ -34,7 +34,13 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 - **`AGENT_MEMORY_PATH`**: JSON file (default under `%LOCALAPPDATA%\grok-mcp-agent\memory.json`) storing Cursor write approvals, optional **`always_allow_level_3`** rules, per-domain headed/headless-ok prefs, and bounded recovery hints.
 - **`MCP_DISABLED_TOOLS`**: Comma-separated tool names rejected at call time (e.g. `browser_task,cursor_agent`). **`get_status`** is always allowed.
 
+### `browser_task` tabs (shared Chrome)
+
+Each **`browser_task`** uses one shared Chrome instance (`keep_alive`). By default it opens a **new tab**; pass **`continue_tab_id`** (from **`list_browser_tabs`** or **`get_status`** → `browser_tabs`) to **resume an idle tab** instead of duplicating work. When a task ends, the tab **stays open** (`status: idle`) with its **`tab_label`** so Grok can see what each tab was for. **`get_status`** and **`list_browser_tabs`** expose open tabs; Grok should check those before starting a similar task again. Use **`close_browser_tab(tab_id)`** when finished. Up to **`BROWSER_TASK_MAX_CONCURRENT`** (default **3**) agents may run at once on different tabs.
+
 ### `browser_task` screenshots (`return_screenshot`)
+
+You must pass **`return_screenshot=true`** in the tool call for **`screenshot_url`** / **`screenshot_base64`** to appear at all. **`PUBLIC_MCP_BASE_URL`** must match your Funnel origin. When the agent finishes with `done` and a bogus **`files_to_display`** (no real file), the server still attempts a **final CDP viewport** capture so Grok can get a PNG URL without relying on browser-use step screenshots.
 
 When **`PUBLIC_MCP_BASE_URL`** is set to the same **`https://…`** origin Grok already uses for MCP (your Funnel URL, no path), successful captures return **`screenshot_url`** pointing at **`GET /browser-screenshot/{token}`** — a **one-time** full PNG response so the model is not fed multi‑megabyte base64 inside tool JSON. Tokens expire after **`BROWSER_SCREENSHOT_URL_TTL_SECONDS`** (default 600). Anyone who obtains the URL can download the image until it is consumed or expires; treat links as sensitive. Set **`BROWSER_SCREENSHOT_INCLUDE_BASE64=true`** if you also want a clipped inline **`screenshot_base64`** (see **`BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS`**). Without **`PUBLIC_MCP_BASE_URL`**, behavior is inline base64 only (capped as before). **`get_status`** reports **`public_mcp_base_url_configured`**.
 

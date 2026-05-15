@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+import browser_hub
 import browser_prefill
 import memory_store
 import secrets_store
@@ -216,6 +217,40 @@ def _build_screenshot_payload(raw_b64: str) -> dict[str, Any]:
     return out
 
 
+def _effective_browser_task(task: str, return_screenshot: bool) -> str:
+    """Steer browser-use away from PDF-as-screenshot when MCP will return screenshot_url."""
+    t = task.strip()
+    if not return_screenshot:
+        return t
+    marker = "[MCP screenshot delivery:"
+    if marker in t:
+        return t
+    return (
+        f"{t}\n\n{marker} Do not use save_as_pdf or done(..., files_to_display) for images; "
+        "the server captures the viewport over CDP when the run finishes. "
+        "Stay on the final product page. "
+        "Explicitly select required size/color options (do not assume defaults). "
+        "The MCP tool result will include screenshot_url (HTTPS PNG), not a local file path.]"
+    )
+
+
+async def _final_viewport_screenshot_b64(browser: Any) -> str | None:
+    """Last-resort PNG as urlsafe base64 when step history never attached a screenshot."""
+    import base64
+
+    try:
+        data = await browser.take_screenshot()
+    except Exception:
+        logger.debug("browser_task final take_screenshot failed", exc_info=True)
+        return None
+    if not data:
+        return None
+    try:
+        return base64.b64encode(data).decode("ascii")
+    except Exception:
+        return None
+
+
 async def _browser_run_once(
     task: str,
     model: str,
@@ -226,6 +261,8 @@ async def _browser_run_once(
     user_data_dir: str | None,
     *,
     return_screenshot: bool = False,
+    browser: Any | None = None,
+    browser_tab_id: str | None = None,
 ) -> tuple[Any | None, BaseException | None, str | None]:
     from browser_use import Agent, BrowserSession
     from browser_use.llm.deepseek.chat import ChatDeepSeek
@@ -240,10 +277,12 @@ async def _browser_run_once(
         temperature=0.2,
         base_url=base_url,
     )
-    bs_kwargs: dict[str, Any] = {"headless": not headed_eff}
-    if user_data_dir:
-        bs_kwargs["user_data_dir"] = user_data_dir
-    browser = BrowserSession(**bs_kwargs)
+    owns_browser = browser is None
+    if browser is None:
+        bs_kwargs: dict[str, Any] = {"headless": not headed_eff, "keep_alive": True}
+        if user_data_dir:
+            bs_kwargs["user_data_dir"] = user_data_dir
+        browser = BrowserSession(**bs_kwargs)
     agent = Agent(
         task=task.strip(),
         llm=llm,
@@ -264,13 +303,32 @@ async def _browser_run_once(
             logger.debug("browser_task on_step_end screenshot failed", exc_info=True)
 
     try:
-        history = await asyncio.wait_for(
-            agent.run(max_steps=ms, on_step_end=on_step_end),
-            timeout=float(to),
-        )
+        async with browser_hub.run_slot():
+            history = await asyncio.wait_for(
+                agent.run(max_steps=ms, on_step_end=on_step_end),
+                timeout=float(to),
+            )
+        if return_screenshot and not raw_b64[0]:
+            raw_b64[0] = await _final_viewport_screenshot_b64(browser)
+            if raw_b64[0] is None:
+                logger.warning(
+                    "browser_task return_screenshot=true but no step screenshot and take_screenshot failed"
+                )
+        if browser_tab_id:
+            await browser_hub.sync_tab_metadata(browser_tab_id, browser)
         return history, None, raw_b64[0]
     except BaseException as e:
+        if return_screenshot and not raw_b64[0]:
+            raw_b64[0] = await _final_viewport_screenshot_b64(browser)
+        if browser_tab_id:
+            await browser_hub.sync_tab_metadata(browser_tab_id, browser)
         return None, e, raw_b64[0]
+    finally:
+        if owns_browser and browser is not None:
+            try:
+                await browser.stop()
+            except Exception:
+                pass
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -299,6 +357,8 @@ def register_tools(mcp: FastMCP) -> None:
             "get_run_log",
             "list_recent_runs",
             "get_status",
+            "list_browser_tabs",
+            "close_browser_tab",
         ]
         mem = memory_store.memory_summary_for_status()
         log_dir = os.getenv("AGENT_LOG_DIR") or ""
@@ -323,6 +383,7 @@ def register_tools(mcp: FastMCP) -> None:
             "memory_summary": mem,
             "agent_log_dir_configured": log_dir or None,
             "browser_user_data_configured": bool(_browser_user_data_dir()),
+            **browser_hub.tabs_summary_for_status(),
             "mcp_disabled_tools_raw": (os.getenv("MCP_DISABLED_TOOLS") or "").strip() or None,
             "tools": tools,
         }
@@ -509,6 +570,23 @@ def register_tools(mcp: FastMCP) -> None:
         return {"ok": True}
 
     @mcp.tool()
+    async def list_browser_tabs(include_closed: bool = False) -> dict[str, Any]:
+        """
+        List tabs opened by browser_task on the shared Chrome instance (still open on your PC until you close them).
+        Each tab has tab_id, run_id, label (Grok's stated purpose), status (running|idle|closed), url, title.
+        """
+        if (g := tool_gating.tool_disabled_error("list_browser_tabs")) is not None:
+            return g
+        return {"tabs": browser_hub.list_tabs(include_closed=include_closed)}
+
+    @mcp.tool()
+    async def close_browser_tab(tab_id: str) -> dict[str, Any]:
+        """Close one browser_task tab by tab_id from list_browser_tabs or a prior browser_task result."""
+        if (g := tool_gating.tool_disabled_error("close_browser_tab")) is not None:
+            return g
+        return await browser_hub.close_tab(tab_id)
+
+    @mcp.tool()
     async def browser_task(
         task: str,
         max_steps: int | None = None,
@@ -519,6 +597,8 @@ def register_tools(mcp: FastMCP) -> None:
         llm_model: str | None = None,
         secret_prefill: list[Any] | None = None,
         return_screenshot: bool = False,
+        tab_label: str | None = None,
+        continue_tab_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Run a natural-language web automation task using Browser Use with DeepSeek (OpenAI-compatible API).
@@ -535,6 +615,15 @@ def register_tools(mcp: FastMCP) -> None:
         full image without megabytes of base64 in JSON. Optional BROWSER_SCREENSHOT_INCLUDE_BASE64=true also inlines
         clipped base64 (BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS, default 700000). Without PUBLIC_MCP_BASE_URL,
         behavior matches the legacy inline path only.
+
+        IMPORTANT: Pass return_screenshot=true for screenshot_url (and set PUBLIC_MCP_BASE_URL). If return_screenshot
+        is omitted, no screenshot fields are returned. The server also runs a final CDP viewport capture when the agent
+        ends without a step screenshot (e.g. done + files_to_display) so Grok still gets a PNG URL when appropriate.
+
+        By default each call opens a new tab. To avoid duplicate work, call list_browser_tabs or get_status first;
+        if an idle tab already matches the goal, pass continue_tab_id (not a new tab). Tabs stay open when tasks end.
+        Optional tab_label records purpose for list_browser_tabs. Use close_browser_tab when done with a tab.
+        Up to BROWSER_TASK_MAX_CONCURRENT (default 3) agents may run at once on different tabs.
         """
         if (g := tool_gating.tool_disabled_error("browser_task")) is not None:
             return g
@@ -588,198 +677,290 @@ def register_tools(mcp: FastMCP) -> None:
             "user_data_dir": bool(user_data),
             "secret_prefill": bool(prefill),
             "return_screenshot": return_screenshot,
+            "tab_label": (tab_label or "").strip()[:200] or None,
+            "continue_tab_id": (continue_tab_id or "").strip() or None,
         }
         if prefill:
             run_meta["secret_prefill_summary"] = _secret_prefill_summary(prefill)
+
+        task_for_agent = _effective_browser_task(task, return_screenshot)
+        cont = (continue_tab_id or "").strip() or None
+        if cont:
+            task_for_agent = (
+                f"{task_for_agent}\n\n[MCP: Continuing on existing browser tab {cont}; "
+                "do not restart from homepage unless required. Build on the current page state.]"
+            )
         run_id = start_run("browser_task", run_meta)
-
-        if prefill:
-            append_event(run_id, {"kind": "secret_prefill_start"})
-            perr = await browser_prefill.run_secret_prefill(prefill, headed_eff, user_data)
-            if perr:
-                append_event(run_id, {"kind": "secret_prefill_failed", "message": perr[:800]})
-                finish_run(
-                    run_id,
-                    "error",
-                    {"error": "secret_prefill_failed", "message": perr[:2000]},
-                )
-                return {
-                    "run_id": run_id,
-                    "error": "secret_prefill_failed",
-                    "message": perr,
-                    "headed": headed_eff,
-                    "headed_retry": False,
-                    "domain_hints": domain_hints,
-                }
-            append_event(run_id, {"kind": "secret_prefill_ok"})
-
-        append_event(run_id, {"kind": "agent_created"})
-
-        screenshot_payload: dict[str, Any] = {}
-
-        def _merge_shot(out: dict[str, Any]) -> dict[str, Any]:
-            if not return_screenshot:
-                return out
-            r = dict(out)
-            r.update(screenshot_payload)
-            return r
-
-        def _after_screenshot_built(sp: dict[str, Any]) -> None:
-            sn = sp.get("screenshot_note")
-            if sn and any(x in sn for x in ("too_large", "invalid_screenshot", "png_too_large")):
-                append_event(run_id, {"kind": "screenshot_omitted", "detail": str(sn)[:300]})
-
-        history, err, raw_shot = await _browser_run_once(
-            task.strip(),
-            model,
-            ms,
-            float(to),
-            use_vision,
-            headed_eff,
-            user_data,
+        label = (tab_label or "").strip() or task.strip()[:120]
+        open_tabs = browser_hub.list_tabs(include_closed=False)
+        return await _browser_task_body(
+            run_id=run_id,
+            task_for_agent=task_for_agent,
+            tab_label=label,
+            continue_tab_id=cont,
+            open_tabs_hint=open_tabs if not cont else None,
+            prefill=prefill,
+            ms=ms,
+            ms2=max(1, ms - 10),
+            to=to,
+            model=model,
+            use_vision=use_vision,
+            headed_eff=headed_eff,
+            domain_hints=domain_hints,
+            user_data=user_data,
             return_screenshot=return_screenshot,
         )
-        if return_screenshot and raw_shot:
-            screenshot_payload = _build_screenshot_payload(raw_shot)
-            _after_screenshot_built(screenshot_payload)
 
-        headed_retry = False
-        ms2 = max(1, ms - 10)
 
-        def _finalize_success(hist: Any, headed_used: bool, retry: bool) -> dict[str, Any]:
-            final = None
-            try:
-                final = hist.final_result()
-            except Exception:
-                pass
-            last_url = None
-            try:
-                if hist.history:
-                    h = hist.history[-1]
-                    state = getattr(h, "state", None)
-                    if state is not None:
-                        last_url = getattr(state, "url", None)
-            except Exception:
-                pass
-            summary: dict[str, Any] = {}
-            try:
-                summary = summarize_browser_history(hist)
-                append_event(run_id, {"kind": "browser_summary", **summary})
-            except Exception as ex:
-                append_event(run_id, {"kind": "browser_summary_skipped", "message": str(ex)[:500]})
+async def _browser_task_body(
+    *,
+    run_id: str,
+    task_for_agent: str,
+    tab_label: str,
+    continue_tab_id: str | None,
+    open_tabs_hint: list[dict[str, Any]] | None,
+    prefill: list[Any],
+    ms: int,
+    ms2: int,
+    to: int,
+    model: str,
+    use_vision: bool,
+    headed_eff: bool,
+    domain_hints: list[str],
+    user_data: str | None,
+    return_screenshot: bool,
+) -> dict[str, Any]:
+    browser_session: Any | None = None
+    browser_tab_id: str | None = None
+    resumed = bool(continue_tab_id)
+    try:
+        if continue_tab_id:
+            browser_session, browser_tab_id = await browser_hub.resume_tab_for_run(
+                run_id,
+                continue_tab_id,
+                headed=headed_eff,
+                user_data_dir=user_data,
+            )
+            append_event(
+                run_id,
+                {
+                    "kind": "browser_tab_resumed",
+                    "browser_tab_id": browser_tab_id,
+                    "label": tab_label[:200],
+                },
+            )
+        else:
+            browser_session, browser_tab_id = await browser_hub.open_tab_for_run(
+                run_id,
+                tab_label,
+                headed=headed_eff,
+                user_data_dir=user_data,
+            )
+            append_event(
+                run_id,
+                {"kind": "browser_tab_opened", "browser_tab_id": browser_tab_id, "label": tab_label[:200]},
+            )
+    except Exception as e:
+        logger.exception("browser tab setup failed")
+        finish_run(run_id, "error", {"error": "browser_tab_setup_failed"})
+        err_out: dict[str, Any] = {
+            "run_id": run_id,
+            "error": "browser_tab_setup_failed",
+            "message": str(e)[:2000],
+        }
+        if open_tabs_hint:
+            err_out["open_browser_tabs"] = open_tabs_hint
+            err_out["hint"] = "Use continue_tab_id to resume an idle tab instead of opening a duplicate."
+        return err_out
 
-            dom = _primary_browser_domain(domain_hints, last_url)
-            if dom and headed_used:
-                memory_store.set_domain_headed_preference(dom, True, "successful headed run")
-            elif dom and not headed_used:
-                memory_store.set_domain_headless_ok(dom, True)
+    def _with_tab(out: dict[str, Any]) -> dict[str, Any]:
+        if browser_tab_id:
+            out["browser_tab_id"] = browser_tab_id
+            out["browser_tab_label"] = tab_label
+            out["browser_tab_left_open"] = True
+            out["browser_tab_resumed"] = resumed
+        if open_tabs_hint and not resumed:
+            idle = [t for t in open_tabs_hint if t.get("status") == "idle"]
+            if idle:
+                out["open_browser_tabs"] = idle
+                out["hint"] = (
+                    "Idle tabs are still open. Next time, use continue_tab_id to continue one "
+                    "instead of starting a duplicate tab."
+                )
+        return out
 
+    try:
+        return _with_tab(
+            await _browser_task_body_inner(
+                run_id=run_id,
+                task_for_agent=task_for_agent,
+                prefill=prefill,
+                ms=ms,
+                ms2=ms2,
+                to=to,
+                model=model,
+                use_vision=use_vision,
+                headed_eff=headed_eff,
+                domain_hints=domain_hints,
+                user_data=user_data,
+                return_screenshot=return_screenshot,
+                browser_session=browser_session,
+                browser_tab_id=browser_tab_id,
+            )
+        )
+    finally:
+        if browser_tab_id and browser_session is not None:
+            await browser_hub.mark_tab_idle(browser_tab_id, browser_session)
+
+
+async def _browser_task_body_inner(
+    *,
+    run_id: str,
+    task_for_agent: str,
+    prefill: list[Any],
+    ms: int,
+    ms2: int,
+    to: int,
+    model: str,
+    use_vision: bool,
+    headed_eff: bool,
+    domain_hints: list[str],
+    user_data: str | None,
+    return_screenshot: bool,
+    browser_session: Any,
+    browser_tab_id: str,
+) -> dict[str, Any]:
+    if prefill:
+        append_event(run_id, {"kind": "secret_prefill_start"})
+        perr = await browser_prefill.run_secret_prefill(prefill, headed_eff, user_data)
+        if perr:
+            append_event(run_id, {"kind": "secret_prefill_failed", "message": perr[:800]})
             finish_run(
                 run_id,
-                "success",
-                {"last_url": last_url, "final_result_preview": str(final)[:500] if final else None},
+                "error",
+                {"error": "secret_prefill_failed", "message": perr[:2000]},
             )
-            d = {
+            return {
                 "run_id": run_id,
-                "success": True,
-                "final_result": final,
-                "last_url": last_url,
-                "max_steps": ms if not retry else ms2,
-                "timeout_seconds": to,
-                "model": model,
-                "headed": headed_used,
-                "headed_retry": retry,
+                "error": "secret_prefill_failed",
+                "message": perr,
+                "headed": headed_eff,
+                "headed_retry": False,
                 "domain_hints": domain_hints,
             }
-            if return_screenshot:
-                d.update(screenshot_payload)
-            return d
+        append_event(run_id, {"kind": "secret_prefill_ok"})
 
-        if isinstance(err, asyncio.TimeoutError):
-            append_event(run_id, {"kind": "error", "name": "TimeoutError"})
-            finish_run(run_id, "timeout", {"timeout_seconds": to, "max_steps": ms})
-            return _merge_shot(
-                {
-                    "run_id": run_id,
-                    "error": "timeout",
-                    "timeout_seconds": to,
-                    "max_steps": ms,
-                    "hint": "Retry with a narrower task or higher timeout_seconds (up to 900).",
-                    "headed": headed_eff,
-                    "headed_retry": False,
-                    "domain_hints": domain_hints,
-                }
-            )
+    append_event(run_id, {"kind": "agent_created"})
 
-        if err is not None:
-            err_s = str(err)
-            append_event(run_id, {"kind": "error", "name": type(err).__name__, "message": err_s[:1500]})
-            blob = _browser_signals_blob(None, None, err_s)
-            if not headed_eff and _needs_headed_retry(blob) and not _should_skip_headed_retry(domain_hints):
-                append_event(
-                    run_id,
-                    {"kind": "headed_retry", "reason": "error_signals", "note": "high_impact: headed retry"},
-                )
-                headed_retry = True
-                h2, err2, raw2 = await _browser_run_once(
-                    task.strip(),
-                    model,
-                    ms2,
-                    float(to),
-                    use_vision,
-                    True,
-                    user_data,
-                    return_screenshot=return_screenshot,
-                )
-                if return_screenshot and raw2:
-                    screenshot_payload = _build_screenshot_payload(raw2)
-                    _after_screenshot_built(screenshot_payload)
-                if err2 is None and h2 is not None:
-                    memory_store.append_failure_hint(
-                        "browser_task",
-                        f"headed retry recovered after {type(err).__name__}",
-                    )
-                    memory_store.append_recovery_pattern(
-                        "browser_task", "error_friction", "headed_retry_succeeded"
-                    )
-                    return _finalize_success(h2, True, True)
-                append_event(
-                    run_id,
-                    {"kind": "headed_retry_failed", "message": str(err2)[:800] if err2 else "unknown"},
-                )
-            logger.exception("browser_task failed")
-            finish_run(run_id, "error", {"error": type(err).__name__})
-            return _merge_shot(
-                {
-                    "run_id": run_id,
-                    "error": type(err).__name__,
-                    "message": err_s[:2000],
-                    "headed": headed_eff,
-                    "headed_retry": headed_retry,
-                    "domain_hints": domain_hints,
-                }
-            )
+    screenshot_payload: dict[str, Any] = {}
 
-        assert history is not None
+    def _merge_shot(out: dict[str, Any]) -> dict[str, Any]:
+        if not return_screenshot:
+            return out
+        r = dict(out)
+        r.update(screenshot_payload)
+        return r
+
+    def _after_screenshot_built(sp: dict[str, Any]) -> None:
+        sn = sp.get("screenshot_note")
+        if sn and any(x in sn for x in ("too_large", "invalid_screenshot", "png_too_large")):
+            append_event(run_id, {"kind": "screenshot_omitted", "detail": str(sn)[:300]})
+
+    history, err, raw_shot = await _browser_run_once(
+        task_for_agent,
+        model,
+        ms,
+        float(to),
+        use_vision,
+        headed_eff,
+        user_data,
+        return_screenshot=return_screenshot,
+        browser=browser_session,
+        browser_tab_id=browser_tab_id,
+    )
+    if return_screenshot and raw_shot:
+        screenshot_payload = _build_screenshot_payload(raw_shot)
+        _after_screenshot_built(screenshot_payload)
+
+    headed_retry = False
+
+    def _finalize_success(hist: Any, headed_used: bool, retry: bool) -> dict[str, Any]:
         final = None
         try:
-            final = history.final_result()
+            final = hist.final_result()
+        except Exception:
+            pass
+        last_url = None
+        try:
+            if hist.history:
+                h = hist.history[-1]
+                state = getattr(h, "state", None)
+                if state is not None:
+                    last_url = getattr(state, "url", None)
         except Exception:
             pass
         summary: dict[str, Any] = {}
         try:
-            summary = summarize_browser_history(history)
-        except Exception:
-            pass
-        blob = _browser_signals_blob(final, summary, "")
+            summary = summarize_browser_history(hist)
+            append_event(run_id, {"kind": "browser_summary", **summary})
+        except Exception as ex:
+            append_event(run_id, {"kind": "browser_summary_skipped", "message": str(ex)[:500]})
+
+        dom = _primary_browser_domain(domain_hints, last_url)
+        if dom and headed_used:
+            memory_store.set_domain_headed_preference(dom, True, "successful headed run")
+        elif dom and not headed_used:
+            memory_store.set_domain_headless_ok(dom, True)
+
+        finish_run(
+            run_id,
+            "success",
+            {"last_url": last_url, "final_result_preview": str(final)[:500] if final else None},
+        )
+        d = {
+            "run_id": run_id,
+            "success": True,
+            "final_result": final,
+            "last_url": last_url,
+            "max_steps": ms if not retry else ms2,
+            "timeout_seconds": to,
+            "model": model,
+            "headed": headed_used,
+            "headed_retry": retry,
+            "domain_hints": domain_hints,
+        }
+        if return_screenshot:
+            d.update(screenshot_payload)
+        return d
+
+    if isinstance(err, asyncio.TimeoutError):
+        append_event(run_id, {"kind": "error", "name": "TimeoutError"})
+        finish_run(run_id, "timeout", {"timeout_seconds": to, "max_steps": ms})
+        return _merge_shot(
+            {
+                "run_id": run_id,
+                "error": "timeout",
+                "timeout_seconds": to,
+                "max_steps": ms,
+                "hint": "Retry with a narrower task or higher timeout_seconds (up to 900).",
+                "headed": headed_eff,
+                "headed_retry": False,
+                "domain_hints": domain_hints,
+            }
+        )
+
+    if err is not None:
+        err_s = str(err)
+        append_event(run_id, {"kind": "error", "name": type(err).__name__, "message": err_s[:1500]})
+        blob = _browser_signals_blob(None, None, err_s)
         if not headed_eff and _needs_headed_retry(blob) and not _should_skip_headed_retry(domain_hints):
             append_event(
                 run_id,
-                {"kind": "headed_retry", "reason": "result_signals", "note": "high_impact: headed retry"},
+                {"kind": "headed_retry", "reason": "error_signals", "note": "high_impact: headed retry"},
             )
             headed_retry = True
             h2, err2, raw2 = await _browser_run_once(
-                task.strip(),
+                task_for_agent,
                 model,
                 ms2,
                 float(to),
@@ -787,27 +968,88 @@ def register_tools(mcp: FastMCP) -> None:
                 True,
                 user_data,
                 return_screenshot=return_screenshot,
+                browser=browser_session,
+                browser_tab_id=browser_tab_id,
             )
             if return_screenshot and raw2:
                 screenshot_payload = _build_screenshot_payload(raw2)
                 _after_screenshot_built(screenshot_payload)
             if err2 is None and h2 is not None:
-                dom = domain_hints[0] if domain_hints else None
-                if dom:
-                    memory_store.set_domain_headed_preference(dom, True, "headed retry after bot/login signals")
-                memory_store.append_failure_hint("browser_task", "headed retry after friction signals")
-                memory_store.append_recovery_pattern("browser_task", "result_friction", "headed_retry_succeeded")
+                memory_store.append_failure_hint(
+                    "browser_task",
+                    f"headed retry recovered after {type(err).__name__}",
+                )
+                memory_store.append_recovery_pattern(
+                    "browser_task", "error_friction", "headed_retry_succeeded"
+                )
                 return _finalize_success(h2, True, True)
             append_event(
                 run_id,
                 {"kind": "headed_retry_failed", "message": str(err2)[:800] if err2 else "unknown"},
             )
-            out = _finalize_success(history, headed_eff, True)
-            out["headed_retry_error"] = str(err2)[:1000] if err2 else None
-            out["hint"] = "Headed retry failed; returning headless result. Check last_url or widen task."
-            return out
+        logger.exception("browser_task failed")
+        finish_run(run_id, "error", {"error": type(err).__name__})
+        return _merge_shot(
+            {
+                "run_id": run_id,
+                "error": type(err).__name__,
+                "message": err_s[:2000],
+                "headed": headed_eff,
+                "headed_retry": headed_retry,
+                "domain_hints": domain_hints,
+            }
+        )
 
-        return _finalize_success(history, headed_eff, False)
+    assert history is not None
+    final = None
+    try:
+        final = history.final_result()
+    except Exception:
+        pass
+    summary: dict[str, Any] = {}
+    try:
+        summary = summarize_browser_history(history)
+    except Exception:
+        pass
+    blob = _browser_signals_blob(final, summary, "")
+    if not headed_eff and _needs_headed_retry(blob) and not _should_skip_headed_retry(domain_hints):
+        append_event(
+            run_id,
+            {"kind": "headed_retry", "reason": "result_signals", "note": "high_impact: headed retry"},
+        )
+        headed_retry = True
+        h2, err2, raw2 = await _browser_run_once(
+            task_for_agent,
+            model,
+            ms2,
+            float(to),
+            use_vision,
+            True,
+            user_data,
+            return_screenshot=return_screenshot,
+            browser=browser_session,
+            browser_tab_id=browser_tab_id,
+        )
+        if return_screenshot and raw2:
+            screenshot_payload = _build_screenshot_payload(raw2)
+            _after_screenshot_built(screenshot_payload)
+        if err2 is None and h2 is not None:
+            dom = domain_hints[0] if domain_hints else None
+            if dom:
+                memory_store.set_domain_headed_preference(dom, True, "headed retry after bot/login signals")
+            memory_store.append_failure_hint("browser_task", "headed retry after friction signals")
+            memory_store.append_recovery_pattern("browser_task", "result_friction", "headed_retry_succeeded")
+            return _finalize_success(h2, True, True)
+        append_event(
+            run_id,
+            {"kind": "headed_retry_failed", "message": str(err2)[:800] if err2 else "unknown"},
+        )
+        out = _finalize_success(history, headed_eff, True)
+        out["headed_retry_error"] = str(err2)[:1000] if err2 else None
+        out["hint"] = "Headed retry failed; returning headless result. Check last_url or widen task."
+        return out
+
+    return _finalize_success(history, headed_eff, False)
 
 
 def _parse_public_https_url(url: str) -> tuple[str, str] | dict[str, Any]:
