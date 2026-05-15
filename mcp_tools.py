@@ -359,6 +359,7 @@ def register_tools(mcp: FastMCP) -> None:
             "get_status",
             "list_browser_tabs",
             "close_browser_tab",
+            "browser_capture_tab_screenshot",
         ]
         mem = memory_store.memory_summary_for_status()
         log_dir = os.getenv("AGENT_LOG_DIR") or ""
@@ -587,6 +588,30 @@ def register_tools(mcp: FastMCP) -> None:
         return await browser_hub.close_tab(tab_id)
 
     @mcp.tool()
+    async def browser_capture_tab_screenshot(tab_id: str) -> dict[str, Any]:
+        """
+        Fast viewport PNG via CDP from a tracked tab (no Browser Use / DeepSeek). Completes in seconds.
+        Use browser_tab_id from a prior browser_task result or list_browser_tabs / get_status.
+        Returns screenshot_url (and optional screenshot_base64) like browser_task when PUBLIC_MCP_BASE_URL is set.
+        """
+        if (g := tool_gating.tool_disabled_error("browser_capture_tab_screenshot")) is not None:
+            return g
+        b64, err = await browser_hub.capture_tab_viewport_png_b64(tab_id)
+        if err:
+            out: dict[str, Any] = {
+                "error": "capture_failed",
+                "detail": err,
+                "tab_id": (tab_id or "").strip(),
+            }
+            if not (os.getenv("PUBLIC_MCP_BASE_URL") or "").strip():
+                out["hint"] = "Set PUBLIC_MCP_BASE_URL for screenshot_url after capture succeeds."
+            return out
+        payload = _build_screenshot_payload(b64)
+        payload["tab_id"] = (tab_id or "").strip()
+        payload["success"] = True
+        return payload
+
+    @mcp.tool()
     async def browser_task(
         task: str,
         max_steps: int | None = None,
@@ -623,6 +648,7 @@ def register_tools(mcp: FastMCP) -> None:
         By default each call opens a new tab. To avoid duplicate work, call list_browser_tabs or get_status first;
         if an idle tab already matches the goal, pass continue_tab_id (not a new tab). Tabs stay open when tasks end.
         Optional tab_label records purpose for list_browser_tabs. Use close_browser_tab when done with a tab.
+        For a screenshot only (no agent, fast), use browser_capture_tab_screenshot(tab_id) with browser_tab_id from a prior run or list_browser_tabs.
         Up to BROWSER_TASK_MAX_CONCURRENT (default 3) agents may run at once on different tabs.
         """
         if (g := tool_gating.tool_disabled_error("browser_task")) is not None:

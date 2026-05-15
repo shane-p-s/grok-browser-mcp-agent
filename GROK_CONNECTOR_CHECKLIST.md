@@ -105,6 +105,7 @@ Exact names (for `allowed_tools` in Grok):
 | `browser_task` | Browser Use + DeepSeek; **shared Chrome**, **new tab per call** (or **`continue_tab_id`** to resume an **idle** tab); optional **`tab_label`** for listing; **`return_screenshot=true`** + operator **`PUBLIC_MCP_BASE_URL`** → **`screenshot_url`** (one-time HTTPS PNG); optional **`secret_prefill`**; **`task`** must not contain raw secrets; returns **`run_id`**, **`browser_tab_id`**, etc. |
 | `list_browser_tabs` | Open tabs from **`browser_task`**: **`tab_id`**, **`label`**, **`run_id`**, **`status`** (`running` / `idle`), **`url`**, **`title`** |
 | `close_browser_tab` | Close a tab by **`tab_id`** from **`list_browser_tabs`** or a prior **`browser_task`** result |
+| `browser_capture_tab_screenshot` | **Fast CDP-only** viewport PNG: pass **`tab_id`**; returns **`screenshot_url`** like **`browser_task`** (no agent; avoids Grok timeout on long automation) |
 | `cursor_agent` | Cursor `agent` CLI; levels **1=ask**, **2=plan (default)**, **3=agent+force** after **`approve_cursor_writes`** or durable rule; returns **`run_id`** |
 | `approve_cursor_writes` | Persist Level-3 permission; optional **`always_allow_level_3_rule`** for durable rule |
 | `revoke_cursor_writes` | Clear Level-3 permission **and** always-allow rule for one workspace path |
@@ -126,7 +127,7 @@ Exact names (for `allowed_tools` in Grok):
   - Prefer **`screenshot_url`**: HTTPS URL on the same host; **GET once** → full **PNG** binary (`Cache-Control: no-store`, token consumed or TTL). Grok (or the user) must **fetch that URL** to attach or view the image — the MCP JSON alone does not embed multi-megabyte pixels unless **`BROWSER_SCREENSHOT_INCLUDE_BASE64`** is enabled on the server.  
   - May include **`screenshot_delivery`:** `"url_only_no_inline_base64"` when only the URL is returned.  
   - **`screenshot_note`** if something was omitted or clipped.
-- **“Vision”:** DeepSeek inside browser-use still does **not** use vision for **`deepseek-*`** models (browser-use may log **`use_vision=False`**). Grok’s **multimodal** path is: call **`browser_task`** with **`return_screenshot=true`**, read **`screenshot_url`**, then **load the PNG** (HTTP GET) for analysis or to show the user — not a separate MCP tool after the fact.
+- **“Vision”:** DeepSeek inside browser-use still does **not** use vision for **`deepseek-*`** models (browser-use may log **`use_vision=False`**). Grok’s **multimodal** path is: call **`browser_task`** with **`return_screenshot=true`**, read **`screenshot_url`**, then **load the PNG** (HTTP GET) for analysis or to show the user. If **`browser_task`** responses time out on Grok’s side but the tab is still open on the PC, call **`browser_capture_tab_screenshot(tab_id)`** (seconds, no LLM) and then **GET** the returned **`screenshot_url`**.
 
 **Security guidance for Grok:** encourage the human to start with **`allowed_tools`** = `["ping","get_status","fetch_url"]`, then expand. **`cursor_agent`** Level **3** / `apply_changes=true` requires **`approve_cursor_writes`** or **`always_allow_level_3_rule`** for that workspace — high impact on disk when allowed.
 
@@ -157,7 +158,7 @@ If Grok’s connector **fails initialization** or hangs, operator should try tog
 | 503 on `/mcp/` | `AUTH_TOKEN` unset on server |
 | 307 then 401 | Use **`/mcp/`** with trailing slash; verify `Authorization` on final request |
 | MCP parse errors | Not hitting real MCP endpoint; wrong path |
-| Tool timeout | Long `browser_task` / `cursor_agent`; operator should reduce scope or increase timeouts |
+| Tool timeout | Long `browser_task` / `cursor_agent`; operator should reduce scope or increase timeouts. For **screenshots only** after a tab is already open, use **`browser_capture_tab_screenshot`** (fast) instead of another full **`browser_task`**. |
 
 ---
 
@@ -181,6 +182,7 @@ Typical production shape:
 6. **POST** `tools/call` `fetch_url` with `{"url":"https://example.com"}` — expect `status_code` **200** in structured result.
 7. Run **`browser_task`** or **`cursor_agent`** once, read returned **`run_id`**, then **`list_recent_runs`** and **`get_run_log`** — expect redacted event arrays (no secrets).
 8. For screenshots: run **`browser_task`** with **`return_screenshot=true`** (operator must set **`PUBLIC_MCP_BASE_URL`**); expect **`screenshot_url`** in the result, then **GET** that URL once for the PNG. Optional: **`list_browser_tabs`** after a run to see **`tab_id`** / **`label`** / **`idle`** tabs; **`continue_tab_id`** on a follow-up task reuses a tab.
+9. If Grok loses the **`browser_task`** response but the browser tab is still open: **`browser_capture_tab_screenshot`** with **`tab_id`** → **`screenshot_url`** → **GET** the PNG (add this tool to **`allowed_tools`**).
 
 ---
 

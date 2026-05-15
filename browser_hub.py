@@ -225,11 +225,54 @@ def tabs_summary_for_status() -> dict[str, Any]:
         "browser_tabs": open_tabs[:25],
         "browser_tabs_hint": (
             "Before opening a duplicate task, check browser_tabs (or list_browser_tabs). "
-            "To continue on an existing idle tab, call browser_task with continue_tab_id=<tab_id>."
+            "To continue on an existing idle tab, call browser_task with continue_tab_id=<tab_id>. "
+            "For a fast PNG without running the agent, use browser_capture_tab_screenshot(tab_id)."
             if open_tabs
             else None
         ),
     }
+
+
+async def capture_tab_viewport_png_b64(tab_id: str) -> tuple[str | None, str | None]:
+    """
+    Focus tab and capture viewport via CDP (no Browser Use / DeepSeek).
+    Returns (standard base64 PNG string, error code) — error is None on success.
+    """
+    import base64
+
+    from browser_use.browser.events import SwitchTabEvent
+
+    tid = (tab_id or "").strip()
+    if not tid:
+        return None, "tab_id_required"
+    if not _cdp_url:
+        return None, "browser_hub_inactive_run_browser_task_first"
+    async with _hub_lock:
+        rec = _tabs.get(tid)
+        if not rec or rec.status == "closed":
+            return None, "tab_not_found_or_closed"
+        target_id = rec.target_id
+        headed = bool(_headed_launched)
+        udd = _user_data_dir
+    if not target_id:
+        return None, "tab_has_no_target_id"
+    try:
+        session = await create_attached_session(headed=headed, user_data_dir=udd)
+        await session.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
+        data = await session.take_screenshot()
+    except Exception as e:
+        logger.warning("capture_tab_viewport_png_b64 %s: %s", tid, e)
+        return None, f"capture_failed:{type(e).__name__}"
+    if not data:
+        return None, "empty_screenshot"
+    try:
+        await sync_tab_metadata(tid, session)
+    except Exception:
+        pass
+    try:
+        return base64.b64encode(data).decode("ascii"), None
+    except Exception:
+        return None, "base64_encode_failed"
 
 
 async def close_tab(tab_id: str) -> dict[str, Any]:

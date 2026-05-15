@@ -27,6 +27,7 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 | `browser_task` | **Browser Use** + **DeepSeek** (`DEEPSEEK_API_KEY`); default **headless**, per-domain memory; optional **headed** retry; **`secret_prefill`** / **`BROWSER_USER_DATA_DIR`** as before; **shared Chrome** — new tab or **`continue_tab_id`**, optional **`tab_label`**; **`return_screenshot=true`** + **`PUBLIC_MCP_BASE_URL`** → **`screenshot_url`**; see sections below |
 | `list_browser_tabs` | Open automation tabs: **`tab_id`**, **`label`**, **`status`**, **`url`**, **`title`** |
 | `close_browser_tab` | Close a tab by **`tab_id`** |
+| `browser_capture_tab_screenshot` | **CDP-only** viewport PNG in seconds — pass **`tab_id`**; returns **`screenshot_url`** like **`browser_task`** (no LLM; use when Grok times out on long **`browser_task`**) |
 | `cursor_agent` | [Cursor Agent CLI](https://cursor.com/docs/cli/headless): **`capability_level`** 1=`ask`, 2=`plan` (default), 3=`agent`+`--force` only after **`approve_cursor_writes`** for that workspace; returns **`run_id`** |
 | `approve_cursor_writes` | Persist Level 3 (apply) for one workspace; set **`always_allow_level_3_rule=true`** for a durable “always allow” rule until **`revoke_cursor_writes`** |
 | `revoke_cursor_writes` | Remove Level 3 permission **and** any always-allow rule for a workspace |
@@ -47,6 +48,10 @@ Each **`browser_task`** uses one shared Chrome instance (`keep_alive`). By defau
 You must pass **`return_screenshot=true`** in the tool call for **`screenshot_url`** / **`screenshot_base64`** to appear at all. **`PUBLIC_MCP_BASE_URL`** must match your Funnel origin. When the agent finishes with `done` and a bogus **`files_to_display`** (no real file), the server still attempts a **final CDP viewport** capture so Grok can get a PNG URL without relying on browser-use step screenshots.
 
 When **`PUBLIC_MCP_BASE_URL`** is set to the same **`https://…`** origin Grok already uses for MCP (your Funnel URL, no path), successful captures return **`screenshot_url`** pointing at **`GET /browser-screenshot/{token}`** — a **one-time** full PNG response so the model is not fed multi‑megabyte base64 inside tool JSON. Tokens expire after **`BROWSER_SCREENSHOT_URL_TTL_SECONDS`** (default 600). Anyone who obtains the URL can download the image until it is consumed or expires; treat links as sensitive. Set **`BROWSER_SCREENSHOT_INCLUDE_BASE64=true`** if you also want a clipped inline **`screenshot_base64`** (see **`BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS`**). Without **`PUBLIC_MCP_BASE_URL`**, behavior is inline base64 only (capped as before). **`get_status`** reports **`public_mcp_base_url_configured`**.
+
+### Fast screenshot only (`browser_capture_tab_screenshot`)
+
+If Grok’s MCP client **drops long `browser_task` calls** but **`get_status` still works**, call **`browser_capture_tab_screenshot`** with **`tab_id`** from **`list_browser_tabs`** or a prior **`browser_task`** result. It runs **only CDP `take_screenshot`** (no DeepSeek) and returns **`screenshot_url`** the same way. The tab must still be open and tracked (hub active).
 
 ### Grok `allowed_tools`
 
