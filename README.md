@@ -16,7 +16,7 @@ Remote **`GET /health`** only proves **something** answered on the funnel URL; *
 - **Tailscale disconnected** — funnel endpoints go away or flap. Check Tailscale on the PC is **Connected**.
 - **Uvicorn exited or wedged** — run **`restart-mcp.bat`** (stops then starts; pin it to the taskbar) or **`.\stop.ps1`** then **`.\start.ps1`**. **`stop.ps1`** kills whatever is **LISTEN**ing on **`PORT`** (default **8765**) when **Ctrl+C** does not work.
 
-**One-click restart (pin to taskbar):** in the repo folder, use **`restart-mcp.bat`**. Right‑click it → **Show more options** → **Pin to taskbar** (Windows 10/11), or create a shortcut to **`restart-mcp.bat`** and pin the shortcut. No need to `cd` manually; scripts use their own folder.
+**One-click restart (pin to taskbar):** in the repo folder, use **`restart-mcp.bat`**. For a **system tray** icon with **no foreground console**, use **`mcp-tray.bat`** instead (see [System tray](#system-tray-windows--no-powershell-window) below). Right‑click **`restart-mcp.bat`** → **Show more options** → **Pin to taskbar** (Windows 10/11), or create a shortcut to **`restart-mcp.bat`** and pin the shortcut. No need to `cd` manually; scripts use their own folder.
 - **`browser_task` load** — long runs + Playwright/Chrome can stress RAM; orphan Chromium after a force-kill may linger. Close extra Chrome windows; lower **`BROWSER_TASK_MAX_CONCURRENT`** if needed.
 
 **`Ctrl+C` on Windows** sometimes does not stop uvicorn (focus, console host, or blocked process). Prefer **`restart-mcp.bat`**, **`.\stop.ps1`**, or closing the window after **`stop.ps1`**.
@@ -132,6 +132,14 @@ Or use **[`start.ps1`](start.ps1)** in the repo root (loads `.env` key=value lin
 
 Defaults: **`HOST=127.0.0.1`** in [`main.py`](main.py) `__main__` when using env; **`start.ps1`** defaults port **8765** if `PORT` is unset.
 
+### System tray (Windows — no PowerShell window)
+
+For a **native-style** setup, run **[`mcp-tray.bat`](mcp-tray.bat)** after `pip install -r requirements.txt` (includes **`pystray`** and **`pillow`**). The batch file prefers **`pythonw.exe`** from your **`.venv`** so **neither** uvicorn nor the tray helper keeps a **console window** open. A **notification area** icon appears; **right‑click** for **Restart MCP**, **Stop MCP**, **Open repo folder**, **Open server log** (`logs/mcp-server.log`), and **Exit** (stops the server and closes the tray). Uvicorn and **`stop.ps1`** are spawned **without** extra console windows (`CREATE_NO_WINDOW`).
+
+If the icon never appears (e.g. missing deps), run **`python mcp_tray.py`** once in PowerShell to see the error, then **`pip install pystray pillow`**.
+
+Run **only one** tray instance (or one `start.ps1` / manual uvicorn) so **`PORT`** is not double-bound. If the icon is hidden, open the **^** overflow area next to the clock and drag the icon to the visible row. You can pin **`mcp-tray.bat`** or add a shortcut under **`shell:startup`** for login start; for **Task Scheduler**, use **`mcp-tray.bat`** with **Start in** set to the repo folder instead of `start.ps1` if you prefer the tray over a visible console.
+
 ### Cursor CLI
 
 1. Install the CLI: [CLI installation](https://cursor.com/docs/cli/installation) (Windows: `irm 'https://cursor.com/install?win32=true' | iex`).
@@ -193,7 +201,7 @@ Then set Grok’s connector URL to `https://<your-funnel-host>/mcp/` (with trail
 ## Windows Task Scheduler (stability)
 
 - **Trigger:** At log on (the dedicated automation user), or at startup if appropriate.
-- **Action:** `powershell.exe -ExecutionPolicy Bypass -File C:\Path\to\grok-browser-mcp-agent\start.ps1` with **“Start in”** set to the repo directory (or invoke `python -m uvicorn ...` after setting env vars).
+- **Action:** `C:\Path\to\grok-browser-mcp-agent\mcp-tray.bat` with **“Start in”** set to the repo directory for a **tray-only** run, or `powershell.exe -ExecutionPolicy Bypass -File C:\Path\to\grok-browser-mcp-agent\start.ps1` if you want a visible console (or invoke `python -m uvicorn ...` after setting env vars).
 - **Settings:** “Restart on failure” with a short delay.
 - After updates, restart the task so **Playwright** / **browser-use** pick up changes.
 
