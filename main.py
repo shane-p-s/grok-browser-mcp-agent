@@ -4,9 +4,11 @@ Grok-ready MCP server: Streamable HTTP (stateless) + Bearer auth on /mcp, health
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+import time
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -123,8 +125,33 @@ async def health(_):
             "status": "healthy",
             "mcp_json_response": _json_response_flag(),
             "mcp_path": "/mcp/",
+            "live_probe": "/health/live",
         }
     )
+
+
+async def health_live(request):
+    """
+    Liveness: fails if the asyncio loop has not run the heartbeat recently (possible deadlock / blocking call).
+    """
+    max_age = float(os.getenv("HEALTH_LIVE_MAX_STALE_SECONDS", "15"))
+    last = getattr(request.app.state, "last_loop_tick", None)
+    if last is None:
+        return JSONResponse(
+            {"status": "unknown", "detail": "heartbeat not started"},
+            status_code=503,
+        )
+    age = time.monotonic() - last
+    if age > max_age:
+        return JSONResponse(
+            {
+                "status": "degraded",
+                "loop_stale_seconds": round(age, 1),
+                "detail": "event loop has not ticked recently; server may be wedged",
+            },
+            status_code=503,
+        )
+    return JSONResponse({"status": "live", "loop_stale_seconds": round(age, 1)})
 
 
 async def root(_):
@@ -132,6 +159,7 @@ async def root(_):
         {
             "service": "grok-browser-mcp-agent",
             "health": "/health",
+            "health_live": "/health/live",
             "mcp": "/mcp/",
             "oauth_metadata": "/.well-known/oauth-authorization-server",
             "browser_screenshot": "/browser-screenshot/{token} (GET; one-time PNG when PUBLIC_MCP_BASE_URL is set)",
@@ -164,14 +192,31 @@ async def browser_screenshot(request):
 
 @asynccontextmanager
 async def lifespan(app: Starlette):
-    async with _mcp_asgi.router.lifespan_context(_mcp_asgi):
-        yield
+    app.state.last_loop_tick = time.monotonic()
+
+    async def _heartbeat() -> None:
+        try:
+            while True:
+                app.state.last_loop_tick = time.monotonic()
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            return
+
+    hb = asyncio.create_task(_heartbeat())
+    try:
+        async with _mcp_asgi.router.lifespan_context(_mcp_asgi):
+            yield
+    finally:
+        hb.cancel()
+        with suppress(asyncio.CancelledError):
+            await hb
 
 
 routes = [
     Route("/", root, methods=["GET"]),
     Route("/browser-screenshot/{token}", browser_screenshot, methods=["GET"]),
     Route("/health", health, methods=["GET"]),
+    Route("/health/live", health_live, methods=["GET"]),
     Route("/.well-known/oauth-authorization-server", oauth_metadata, methods=["GET"]),
     Route("/.well-known/oauth-authorization-server/", oauth_metadata, methods=["GET"]),
     Route("/oauth/authorize", oauth_authorize, methods=["GET"]),

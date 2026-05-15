@@ -22,6 +22,7 @@ Per xAI documentation ([Remote MCP Tools](https://docs.x.ai/developers/tools/rem
 |--------|-------------|
 | MCP endpoint (use in Grok connector) | `https://<public-host>/mcp/` |
 | Health check (no auth) | `https://<public-host>/health` |
+| Liveness (no auth; asyncio heartbeat) | `https://<public-host>/health/live` |
 | Service root (no auth) | `https://<public-host>/` |
 
 **Trailing slash on `/mcp/`:** Strongly recommended. Some HTTP stacks issue a **307** redirect for `/mcp` → `/mcp/` and may drop or mishandle the **`Authorization`** header on redirect. Using **`/mcp/`** avoids that class of failure.
@@ -57,7 +58,7 @@ At least one of **`AUTH_TOKEN`** or full OAuth config (**`OAUTH_CLIENT_ID`** + *
 2. **Wrong token** — **401** (`detail`: invalid bearer token).
 3. **Neither static nor OAuth configured on server** — **503** (“misconfiguration”).
 
-**Unauthenticated endpoints:** `GET /health`, `GET /`, **`/.well-known/oauth-authorization-server`**, **`/oauth/authorize`**, **`/oauth/token`** (POST) — used for liveness / OAuth; **`/mcp/`** requires Bearer as above.
+**Unauthenticated endpoints:** `GET /health`, **`GET /health/live`**, `GET /`, **`/.well-known/oauth-authorization-server`**, **`/oauth/authorize`**, **`/oauth/token`** (POST) — used for liveness / OAuth; **`/mcp/`** requires Bearer as above.
 
 ---
 
@@ -174,7 +175,7 @@ Typical production shape:
 
 ## 10. Ordered self-test sequence (Grok can suggest this to the human)
 
-1. **GET** `/health` from public URL — expect JSON with `"status": "healthy"`.
+1. **GET** `/health` from public URL — expect JSON with `"status": "healthy"`. **GET** `/health/live` — expect **`"status":"live"`**; **`503`** with **`degraded`** suggests the Python process is wedged (event loop not running).
 2. **POST** `/mcp/` `initialize` with JSON-RPC — expect **200** and a `result` object.
 3. **POST** `tools/list` — expect tool names including `ping`.
 4. **POST** `tools/call` `get_status` with `{}` — expect structured result with `tools` array and boolean capability flags (no raw secrets); may include **`browser_tabs`**, **`browser_hub_active`**, **`public_mcp_base_url_configured`** when browser/screenshot features are in use.

@@ -9,7 +9,7 @@
 - **Screenshots (Grok)**: When **`return_screenshot=true`** on **`browser_task`** and **`PUBLIC_MCP_BASE_URL`** is set (same Funnel origin as MCP), the tool returns a one-time **`screenshot_url`** (`GET /browser-screenshot/{token}` in [`main.py`](main.py)), via [`screenshot_serve.py`](screenshot_serve.py). Step history may be empty; then **`BrowserSession.take_screenshot()`** runs after the agent. **`browser_capture_tab_screenshot`** reuses the same URL registration for an existing tab without running the agent. Optional inline **`screenshot_base64`** via env.
 - **Cursor**: **Headless Cursor Agent CLI** (`agent --print`, `--trust`, `--workspace`) with **capability levels** (ask / plan / agent+force) in [`cursor_agent_tools.py`](cursor_agent_tools.py). **`--force`** only after **`approve_cursor_writes`** or **`always_allow_level_3_rule`** (stored in **`memory_store`**).
 - **Optional tool lockout**: [`tool_gating.py`](tool_gating.py) reads **`MCP_DISABLED_TOOLS`**; **`get_status`** is exempt.
-- **Internet ingress**: **[Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel)** terminates TLS and forwards to **`http://127.0.0.1:<port>`**; the app should **not** listen on all interfaces in untrusted environments.
+- **Internet ingress**: **[Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel)** terminates TLS and forwards to **`http://127.0.0.1:<port>`**; the app should **not** listen on all interfaces in untrusted environments. **`GET /health/live`** verifies the asyncio loop is still scheduling (detect process wedge).
 
 ### Run logs (Grok debugging)
 

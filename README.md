@@ -6,6 +6,19 @@ Use the connector URL **`https://<your-funnel-host>/mcp/`** with a **trailing sl
 
 **Reference docs:** **[`ARCHITECTURE.md`](ARCHITECTURE.md)** (browser hub, screenshot route), **[`GROK_CONNECTOR_CHECKLIST.md`](GROK_CONNECTOR_CHECKLIST.md)** (Grok: `browser_task` / tabs / screenshots parameters).
 
+## Reliability (PC + Funnel)
+
+Remote **`GET /health`** only proves **something** answered on the funnel URL; **`GET /health/live`** checks that the **asyncio event loop** has ticked within the last **`HEALTH_LIVE_MAX_STALE_SECONDS`** (default **15**) — useful to detect a **wedged** process (blocked thread) vs a **network / sleep / Tailscale** issue.
+
+**Common reasons cell data cannot reach `/health`:**
+
+- **PC asleep or lid closed** — Windows suspends; Tailscale + Funnel + uvicorn stop serving. Use **never sleep on AC** (or keep the machine awake) when this PC is your MCP relay.
+- **Tailscale disconnected** — funnel endpoints go away or flap. Check Tailscale on the PC is **Connected**.
+- **Uvicorn exited or wedged** — run **`.\stop.ps1`** then **`.\start.ps1`**. **`stop.ps1`** kills whatever is **LISTEN**ing on **`PORT`** (default **8765**) when **Ctrl+C** does not work.
+- **`browser_task` load** — long runs + Playwright/Chrome can stress RAM; orphan Chromium after a force-kill may linger. Close extra Chrome windows; lower **`BROWSER_TASK_MAX_CONCURRENT`** if needed.
+
+**`Ctrl+C` on Windows** sometimes does not stop uvicorn (focus, console host, or blocked process). Prefer **`.\stop.ps1`** or closing the window after **`stop.ps1`**.
+
 ## Transport (MCP Python SDK)
 
 This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](https://github.com/modelcontextprotocol/python-sdk) PyPI package** with **`streamable_http_app()`** (Streamable HTTP / stateless HTTP). Internally the same package wires **`StreamableHTTPSessionManager`** to the low-level **`mcp.server.lowlevel.server.Server`** (`MCPServer`). FastMCP is the **maintained facade** for tool registration and schemas; the wire protocol is the same as calling `streamable_http_app()` through that stack. A future refactor could drop the FastMCP import only if you replace tool registration with explicit `@server.list_tools` / `@server.call_tool` handlers (large change).
