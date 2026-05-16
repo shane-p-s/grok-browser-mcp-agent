@@ -129,6 +129,18 @@ If Grok fails against JSON-only MCP, set **`MCP_JSON_RESPONSE=false`** (SSE-capa
 
 **HTTP 421 on `POST /mcp/` with log line `Invalid Host header: <your>.ts.net`:** The official MCP Streamable HTTP stack validates the **`Host`** header when the server is bound to localhost. Tailscale Funnel forwards with your public **`*.ts.net`** host. Set **`MCP_EXTRA_ALLOWED_HOSTS`** to that hostname (comma-separated if several), for example **`MCP_EXTRA_ALLOWED_HOSTS=your-machine.tail1234.ts.net`**, then restart. Alternatively **`MCP_DNS_REBINDING_PROTECTION=false`** disables the check entirely (weaker on untrusted networks). See [`.env.example`](.env.example).
 
+### Grok / rmcp: “Send message error” or “error sending request for url …/mcp/”
+
+That message comes from **Grok’s MCP client** (e.g. rmcp) while it **sends** the HTTP request or holds the connection — it is **not** printed by this server’s Python stack. Wrapping **`browser_task`** in retry logic **inside this repo cannot fix it**: `mcp_tools.py` runs on your PC **only after** the connector successfully delivers `tools/call`. Retries belong in the **client** (xAI) or by **you** re-invoking the tool.
+
+What still helps in practice:
+
+1. Toggle **`MCP_JSON_RESPONSE=false`** and restart (see above).
+2. Keep the **`task`** argument short; very long tasks are rejected with **`task_too_long_for_mcp_client`** (see **`BROWSER_TASK_MAX_INCOMING_TASK_CHARS`** in [`.env.example`](.env.example)).
+3. If **`browser_task`** fails in chat but the browser on the PC is fine, call **`browser_capture_tab_screenshot`** with **`tab_id`** from **`list_browser_tabs`** (same idea as in **Grok: login page screenshot + operator secrets** above).
+
+Very large **`final_result`** values in the success payload are **truncated** for MCP JSON stability ( **`BROWSER_TASK_MAX_FINAL_RESULT_CHARS`** ); use **`get_run_log(run_id)`** for a bounded, redacted timeline.
+
 ## Run on Windows (recommended)
 
 ```powershell

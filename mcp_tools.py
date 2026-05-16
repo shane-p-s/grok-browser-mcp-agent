@@ -46,6 +46,33 @@ _MAX_FETCH_BYTES = int(os.getenv("FETCH_MAX_BYTES", "2_000_000"))
 _DEFAULT_BROWSER_TIMEOUT = int(os.getenv("BROWSER_TASK_TIMEOUT_SECONDS", "300"))
 _DEFAULT_BROWSER_MAX_STEPS = int(os.getenv("BROWSER_TASK_MAX_STEPS", "40"))
 
+
+def _final_result_mcp_payload(final: Any) -> dict[str, Any]:
+    """
+    Keep browser_task tool JSON small enough for remote MCP clients (e.g. rmcp / Grok)
+    that fail on very large tools/call responses.
+    """
+    max_chars = int(os.getenv("BROWSER_TASK_MAX_FINAL_RESULT_CHARS", "16000"))
+    if max_chars <= 0:
+        return {"final_result": final}
+    text: str
+    try:
+        if isinstance(final, str):
+            text = final
+        elif isinstance(final, (dict, list)):
+            text = json.dumps(final, ensure_ascii=False, default=str)
+        else:
+            text = str(final)
+    except Exception:
+        text = str(final)
+    if len(text) <= max_chars:
+        return {"final_result": final}
+    return {
+        "final_result": text[:max_chars] + "\n…[truncated; increase BROWSER_TASK_MAX_FINAL_RESULT_CHARS in .env if needed]",
+        "final_result_truncated": True,
+        "final_result_original_chars": len(text),
+    }
+
 _HEADED_RETRY_KEYS = (
     "captcha",
     "cloudflare",
@@ -710,6 +737,18 @@ def register_tools(mcp: FastMCP) -> None:
         if not task or not task.strip():
             return {"error": "task must be a non-empty string"}
 
+        max_task = int(os.getenv("BROWSER_TASK_MAX_INCOMING_TASK_CHARS", "65536"))
+        if max_task > 0 and len(task) > max_task:
+            return {
+                "error": "task_too_long_for_mcp_client",
+                "hint": (
+                    f"Shorten the task string (max {max_task} chars) so the remote MCP client can send tools/call JSON. "
+                    "Move long instructions to follow-up turns; use tab_label and continue_tab_id for tab context."
+                ),
+                "task_chars": len(task),
+                "max_task_chars": max_task,
+            }
+
         prefill = secret_prefill if secret_prefill is not None else []
         if prefill and not isinstance(prefill, list):
             return {"error": "secret_prefill must be a list of steps or omitted"}
@@ -997,7 +1036,6 @@ async def _browser_task_body_inner(
         d = {
             "run_id": run_id,
             "success": True,
-            "final_result": final,
             "last_url": last_url,
             "max_steps": ms if not retry else ms2,
             "timeout_seconds": to,
@@ -1006,6 +1044,7 @@ async def _browser_task_body_inner(
             "headed_retry": retry,
             "domain_hints": domain_hints,
         }
+        d.update(_final_result_mcp_payload(final))
         if return_screenshot:
             d.update(screenshot_payload)
         return d
