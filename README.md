@@ -43,7 +43,13 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 | `list_browser_tabs` | Open automation tabs: **`tab_id`**, **`label`**, **`status`**, **`url`**, **`title`** |
 | `close_browser_tab` | Close a tab by **`tab_id`** |
 | `reset_browser_hub` | Clear stale shared-Chromium state if you **closed the browser window** or attach fails; next **`browser_task`** launches fresh Chromium (**old `tab_id` values invalid**) |
-| `browser_capture_tab_screenshot` | **CDP-only** viewport PNG in seconds — pass **`tab_id`** (or omit when only one tab is unambiguous); returns **`screenshot_url`** like **`browser_task`** (no LLM; use when Grok times out on long **`browser_task`**) |
+| `browser_open_tab` | New tab for **granular** control (no “Starting agent …” tab); optional **`url`**; **`headed`** |
+| `browser_navigate` | **`tab_id` + url`** — direct navigation (seconds) |
+| `browser_get_page_state` | Interactive elements with **`index`** for click/type (bounded list) |
+| `browser_click` | By **`element_index`**, **`css_selector`**, or **`x`/`y`** |
+| `browser_type` | Type text or **`secret_name`** into a field |
+| `browser_press_keys` | e.g. **Enter**, **Tab** |
+| `browser_capture_tab_screenshot` | **CDP-only** viewport PNG in seconds — pass **`tab_id`** (or omit when only one tab is unambiguous); returns **`screenshot_url`** |
 | `cursor_agent` | [Cursor Agent CLI](https://cursor.com/docs/cli/headless): **`capability_level`** 1=`ask`, 2=`plan` (default), 3=`agent`+`--force` only after **`approve_cursor_writes`** for that workspace; returns **`run_id`** |
 | `approve_cursor_writes` | Persist Level 3 (apply) for one workspace; set **`always_allow_level_3_rule=true`** for a durable “always allow” rule until **`revoke_cursor_writes`** |
 | `revoke_cursor_writes` | Remove Level 3 permission **and** any always-allow rule for a workspace |
@@ -69,6 +75,20 @@ When **`PUBLIC_MCP_BASE_URL`** is set to the same **`https://…`** origin Grok 
 
 If Grok’s MCP client **drops long `browser_task` calls** but **`get_status` still works**, call **`browser_capture_tab_screenshot`** with **`tab_id`** from **`list_browser_tabs`** or a prior **`browser_task`** result, or omit **`tab_id`** when exactly one open tab (or exactly one idle tab) makes the target unambiguous. It runs **only CDP `take_screenshot`** (no DeepSeek) and returns **`screenshot_url`** the same way. The tab must still be open and tracked (hub active).
 
+### Granular browser control (preferred for Grok + vision)
+
+Use these instead of one long **`browser_task`** when Grok reports **transport** errors or you need step-by-step login. Each call finishes in **seconds** and can return **`screenshot_url`** when **`return_screenshot=true`** (default on navigate/click/type).
+
+**Typical login flow:**
+
+1. **`browser_open_tab(tab_label="golf login", headed=true, url="https://…/login")`** → **`tab_id`**, optional **`screenshot_url`**
+2. **`browser_get_page_state(tab_id)`** → element **`index`** values
+3. **`browser_type(tab_id, secret_name="golf_password", element_index=…)`** (never put passwords in tool args as plain text)
+4. **`browser_click(tab_id, element_index=…)`** or **`browser_press_keys(tab_id, keys="Enter")`**
+5. Repeat **`browser_get_page_state`** + **`browser_capture_tab_screenshot`** after each step for vision
+
+**`browser_task`** remains for fuzzy multi-step automation (captcha, exploration) when you accept longer runs and possible timeouts. **`browser_open_tab`** does **not** create browser-use “Starting agent …” tabs.
+
 ### Grok `allowed_tools`
 
 **Empty list:** Many connectors treat an **empty** “allowed tools” field as **allow all** registered tools — if **`ping`** and **`get_status`** already work, you often **do not** need to list anything.
@@ -76,7 +96,7 @@ If Grok’s MCP client **drops long `browser_task` calls** but **`get_status` st
 **If your client only calls a subset or flakes on some tools:** paste the full comma-separated list (same order as `get_status` → **`tools`**, or copy **`grok_allowed_tools_csv`** from a `get_status` response after MCP restart):
 
 ```text
-ping,fetch_url,github_get_file,github_list_repo_files,github_get_diff,github_create_issue,request_user_secret,list_secrets,revoke_secret,browser_task,cursor_agent,approve_cursor_writes,revoke_cursor_writes,get_run_log,list_recent_runs,get_status,list_browser_tabs,close_browser_tab,reset_browser_hub,browser_capture_tab_screenshot
+ping,fetch_url,github_get_file,github_list_repo_files,github_get_diff,github_create_issue,request_user_secret,list_secrets,revoke_secret,browser_task,cursor_agent,approve_cursor_writes,revoke_cursor_writes,get_run_log,list_recent_runs,get_status,list_browser_tabs,close_browser_tab,reset_browser_hub,browser_open_tab,browser_navigate,browser_get_page_state,browser_click,browser_type,browser_press_keys,browser_capture_tab_screenshot
 ```
 
 Start with `ping`, `get_status`, then expand as needed. For **`cursor_agent`**, default **`capability_level=2`** (plan / propose). **Level 3** requires **`approve_cursor_writes`** (or **`always_allow_level_3_rule`**) for that workspace on the PC.
@@ -84,7 +104,7 @@ Start with `ping`, `get_status`, then expand as needed. For **`cursor_agent`**, 
 ### Grok: login page screenshot + operator secrets (read this)
 
 1. Call **`get_status`** first and read **`grok_connector_hints`** — it tells you if **`SECRETS_MASTER_KEY`**, **`PUBLIC_MCP_BASE_URL`**, or screenshot Bearer lockdown are relevant.
-2. **Screenshot of the current tab:** `browser_task(..., return_screenshot=true)` **or** `browser_capture_tab_screenshot` (with **`tab_id`** from **`list_browser_tabs`**, or omit **`tab_id`** when unambiguous) after **`list_browser_tabs`**. Without **`PUBLIC_MCP_BASE_URL`**, you will not get **`screenshot_url`**. The connector (or a follow-up **`fetch_url`**) must **HTTPS GET** that URL so Grok can attach or analyze the PNG; when **`BROWSER_SCREENSHOT_REQUIRE_BEARER=true`**, include the same **`Authorization: Bearer …`** as for MCP.
+2. **Screenshot / vision:** Prefer **`browser_open_tab`** → **`browser_navigate`** / **`browser_click`** / **`browser_type`** with **`return_screenshot=true`**, or **`browser_capture_tab_screenshot`**. Without **`PUBLIC_MCP_BASE_URL`**, you will not get **`screenshot_url`**. The connector must **HTTPS GET** that URL for the PNG; when **`BROWSER_SCREENSHOT_REQUIRE_BEARER=true`**, include the same **`Authorization: Bearer …`** as for MCP.
 3. **Operator-entered password (never in `task` text):** with **`SECRETS_MASTER_KEY`** set, restart MCP, call **`request_user_secret`**, operator opens **`submit_url`** on the PC, then use **`secret_prefill`** in **`browser_task`** with stored names. If your connector uses an explicit **`allowed_tools`** list, include **`request_user_secret`** there.
 4. If the connector reports vague “initialization / transport” errors for some tools but **`ping`** works, that is often **xAI’s MCP client** or **missing `allowed_tools`** — not your PC; still verify **`get_status`** and server logs.
 5. **Transport size:** keeping screenshots at **`screenshot_url`** avoids multi‑megabyte **`tools/call`** payloads that some MCP clients reject.

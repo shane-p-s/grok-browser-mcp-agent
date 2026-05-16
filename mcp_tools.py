@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+import browser_granular
 import browser_hub
 import browser_prefill
 import memory_store
@@ -132,6 +133,14 @@ def _grok_connector_hints() -> dict[str, Any]:
         )
     hints.append(
         "If the connector uses an explicit allowed_tools list, include every tool you need (copy grok_allowed_tools_csv from get_status) or leave the list empty when the client allows all tools."
+    )
+    hints.append(
+        "Prefer granular browser tools (browser_open_tab, browser_navigate, browser_get_page_state, browser_click, browser_type, browser_press_keys) "
+        "for login and vision: each call returns in seconds. Use return_screenshot=true for screenshot_url after each step."
+    )
+    hints.append(
+        "browser_task holds the MCP connection for the whole agent run (minutes). Grok transport errors on browser_task often mean the client timed out while Chrome is still working. "
+        "Use continue_tab_id on an existing tab for fuzzy multi-step work only. Each new browser_task without continue_tab_id opens another tab (browser-use titles them 'Starting agent …')."
     )
     return {
         "grok_connector_hints": hints,
@@ -330,6 +339,20 @@ def _build_screenshot_payload(raw_b64: str) -> dict[str, Any]:
     return _screenshot_payload_from_png_bytes(data)
 
 
+async def _merge_tab_screenshot(tab_id: str, return_screenshot: bool, out: dict[str, Any]) -> dict[str, Any]:
+    if not return_screenshot or not (tab_id or "").strip():
+        return out
+    png_bytes, err = await browser_hub.capture_tab_viewport_png_bytes(tab_id)
+    if err:
+        out["screenshot_note"] = err
+        return out
+    try:
+        out.update(await asyncio.to_thread(_screenshot_payload_from_png_bytes, png_bytes))
+    except Exception as e:
+        out["screenshot_note"] = type(e).__name__
+    return out
+
+
 def _effective_browser_task(task: str, return_screenshot: bool) -> str:
     """Steer browser-use away from PDF-as-screenshot when MCP will return screenshot_url."""
     t = task.strip()
@@ -483,6 +506,12 @@ def register_tools(mcp: FastMCP) -> None:
             "list_browser_tabs",
             "close_browser_tab",
             "reset_browser_hub",
+            "browser_open_tab",
+            "browser_navigate",
+            "browser_get_page_state",
+            "browser_click",
+            "browser_type",
+            "browser_press_keys",
             "browser_capture_tab_screenshot",
         ]
         mem = memory_store.memory_summary_for_status()
@@ -734,6 +763,111 @@ def register_tools(mcp: FastMCP) -> None:
         }
 
     @mcp.tool()
+    async def browser_open_tab(
+        tab_label: str = "",
+        url: str = "",
+        headed: bool | None = None,
+        return_screenshot: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Open a new tab in shared Chrome for granular control (no Browser Use agent, no 'Starting agent' tab).
+        Returns tab_id (status idle). Optional url navigates immediately. Prefer this over browser_task for login flows.
+        """
+        if (g := tool_gating.tool_disabled_error("browser_open_tab")) is not None:
+            return g
+        headed_eff, _ = _resolve_browser_headed("", headed)
+        user_data = _browser_user_data_dir()
+        out = await browser_granular.open_tab(
+            tab_label,
+            headed=headed_eff,
+            user_data_dir=user_data,
+            url=url or None,
+        )
+        if out.get("tab_id"):
+            return await _merge_tab_screenshot(out["tab_id"], return_screenshot, out)
+        return out
+
+    @mcp.tool()
+    async def browser_navigate(
+        tab_id: str,
+        url: str,
+        return_screenshot: bool = True,
+    ) -> dict[str, Any]:
+        """Navigate a tracked tab to an https URL. Fast; optional screenshot_url when return_screenshot=true."""
+        if (g := tool_gating.tool_disabled_error("browser_navigate")) is not None:
+            return g
+        out = await browser_granular.navigate(tab_id, url)
+        return await _merge_tab_screenshot(tab_id, return_screenshot, out)
+
+    @mcp.tool()
+    async def browser_get_page_state(tab_id: str) -> dict[str, Any]:
+        """
+        Bounded interactive element list (index, tag, id, name, placeholder, …) for browser_click/browser_type.
+        Call after navigation; refresh after each action if the page changes.
+        """
+        if (g := tool_gating.tool_disabled_error("browser_get_page_state")) is not None:
+            return g
+        return await browser_granular.get_page_state(tab_id)
+
+    @mcp.tool()
+    async def browser_click(
+        tab_id: str,
+        element_index: int | None = None,
+        css_selector: str = "",
+        x: float | None = None,
+        y: float | None = None,
+        return_screenshot: bool = True,
+    ) -> dict[str, Any]:
+        """Click by element index (from browser_get_page_state), css_selector, or x/y coordinates."""
+        if (g := tool_gating.tool_disabled_error("browser_click")) is not None:
+            return g
+        out = await browser_granular.click(
+            tab_id,
+            element_index=element_index,
+            css_selector=css_selector,
+            x=x,
+            y=y,
+        )
+        return await _merge_tab_screenshot(tab_id, return_screenshot, out)
+
+    @mcp.tool()
+    async def browser_type(
+        tab_id: str,
+        text: str = "",
+        element_index: int | None = None,
+        css_selector: str = "",
+        secret_name: str = "",
+        clear_first: bool = True,
+        return_screenshot: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Type into a field by element index or css_selector. Use secret_name (not raw password in tool args) for credentials.
+        """
+        if (g := tool_gating.tool_disabled_error("browser_type")) is not None:
+            return g
+        out = await browser_granular.type_text(
+            tab_id,
+            text,
+            element_index=element_index,
+            css_selector=css_selector,
+            secret_name=secret_name,
+            clear_first=clear_first,
+        )
+        return await _merge_tab_screenshot(tab_id, return_screenshot, out)
+
+    @mcp.tool()
+    async def browser_press_keys(
+        tab_id: str,
+        keys: str,
+        return_screenshot: bool = True,
+    ) -> dict[str, Any]:
+        """Send keys (e.g. Enter, Tab) to the focused tab. browser-use SendKeysEvent format."""
+        if (g := tool_gating.tool_disabled_error("browser_press_keys")) is not None:
+            return g
+        out = await browser_granular.press_keys(tab_id, keys)
+        return await _merge_tab_screenshot(tab_id, return_screenshot, out)
+
+    @mcp.tool()
     async def browser_capture_tab_screenshot(tab_id: str = "") -> dict[str, Any]:
         """
         Fast viewport PNG via CDP from a tracked tab (no Browser Use / DeepSeek). Completes in seconds.
@@ -816,7 +950,8 @@ def register_tools(mcp: FastMCP) -> None:
         assume MCP or Tailscale is down while POST /mcp/ returns 200). For sites with verification interstitials,
         pass headed=true early. Set BROWSER_USER_DATA_DIR for persistent cookies. Requires DEEPSEEK_API_KEY.
 
-        Optional secret_prefill: list of {url, fills:[{selector, secret_name}]} — Playwright fills secrets
+        Optional secret_prefill: list of {url, fills:[{selector, secret_name}]} — Playwright fills secrets in the
+        same shared Chrome as the agent when the hub is active (no second browser window).
         locally before the agent runs so values are not sent to the LLM. URLs must be https://. Never put
         raw secret values in task (task is sent to DeepSeek); reference stored names only.
 
@@ -1004,9 +1139,11 @@ async def _browser_task_body(
             if idle:
                 out["open_browser_tabs"] = idle
                 out["hint"] = (
-                    "Idle tabs are still open. Next time, use continue_tab_id to continue one "
-                    "instead of starting a duplicate tab."
+                    "Idle tabs are still open. Next time, use continue_tab_id on the tab that already has the "
+                    "login page instead of starting another browser_task (each call adds a 'Starting agent …' tab)."
                 )
+            if len(open_tabs_hint) >= 1:
+                out["browser_tabs_before_run"] = len(open_tabs_hint)
         return out
 
     try:
@@ -1052,7 +1189,12 @@ async def _browser_task_body_inner(
 ) -> dict[str, Any]:
     if prefill:
         append_event(run_id, {"kind": "secret_prefill_start"})
-        perr = await browser_prefill.run_secret_prefill(prefill, headed_eff, user_data)
+        perr = await browser_prefill.run_secret_prefill(
+            prefill,
+            headed_eff,
+            user_data,
+            cdp_url=browser_hub.hub_cdp_url(),
+        )
         if perr:
             append_event(run_id, {"kind": "secret_prefill_failed", "message": perr[:800]})
             finish_run(

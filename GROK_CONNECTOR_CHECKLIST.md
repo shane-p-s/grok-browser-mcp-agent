@@ -107,7 +107,13 @@ Exact names (for `allowed_tools` in Grok):
 | `list_browser_tabs` | Open tabs from **`browser_task`**: **`tab_id`**, **`label`**, **`run_id`**, **`status`** (`running` / `idle`), **`url`**, **`title`** |
 | `close_browser_tab` | Close a tab by **`tab_id`** from **`list_browser_tabs`** or a prior **`browser_task`** result |
 | `reset_browser_hub` | Clear shared Chromium CDP cache + tab registry (e.g. operator closed the browser); next **`browser_task`** starts fresh (**invalidates old `tab_id`**) |
-| `browser_capture_tab_screenshot` | **Fast CDP-only** viewport PNG: pass **`tab_id`**, or omit when a single tab is unambiguous (see tool docstring); returns **`screenshot_url`** like **`browser_task`** (no agent; avoids Grok timeout on long automation) |
+| `browser_open_tab` | Granular tab (no “Starting agent …”); optional **`url`**, **`headed`** |
+| `browser_navigate` | **`tab_id` + https url** (fast) |
+| `browser_get_page_state` | Bounded element list with **`index`** for click/type |
+| `browser_click` | **`element_index`**, **`css_selector`**, or **`x`/`y`** |
+| `browser_type` | Text or **`secret_name`** into a field |
+| `browser_press_keys` | Keyboard (e.g. Enter) |
+| `browser_capture_tab_screenshot` | Fast CDP PNG → **`screenshot_url`** |
 | `cursor_agent` | Cursor `agent` CLI; levels **1=ask**, **2=plan (default)**, **3=agent+force** after **`approve_cursor_writes`** or durable rule; returns **`run_id`** |
 | `approve_cursor_writes` | Persist Level-3 permission; optional **`always_allow_level_3_rule`** for durable rule |
 | `revoke_cursor_writes` | Clear Level-3 permission **and** always-allow rule for one workspace path |
@@ -119,6 +125,17 @@ Exact names (for `allowed_tools` in Grok):
 **Grok / xAI checklist:** Call **`get_status`** and read **`grok_connector_hints`**; copy **`grok_allowed_tools_csv`** into the connector if it requires an explicit allowlist. Screenshots need **`PUBLIC_MCP_BASE_URL`** + **`return_screenshot=true`** (tool JSON returns **`screenshot_url`** only — the client must fetch the PNG over HTTPS); optional **`BROWSER_SCREENSHOT_REQUIRE_BEARER=true`** ties that GET to the same Bearer as MCP; **`request_user_secret`** needs **`SECRETS_MASTER_KEY`**.
 
 **Optional lockdown:** env **`MCP_DISABLED_TOOLS`** = comma-separated tool names to reject at **`tools/call`** time (e.g. `browser_task,cursor_agent`). **`get_status`** always runs.
+
+### Granular browser (preferred over long `browser_task`)
+
+1. **`browser_open_tab`** (`headed=true` for login) → **`tab_id`**
+2. **`browser_navigate(tab_id, url)`** with **`return_screenshot=true`**
+3. **`browser_get_page_state(tab_id)`** → use **`index`** in **`browser_click`** / **`browser_type`**
+4. Credentials: **`request_user_secret`** on PC, then **`browser_type(..., secret_name="…")`** — never raw passwords in tool JSON
+5. **`browser_press_keys(tab_id, keys="Enter")`** to submit
+6. Vision after each step: **`return_screenshot=true`** on actions or **`browser_capture_tab_screenshot`**
+
+Avoid starting a new **`browser_task`** for every step (transport timeouts + extra “Starting agent …” tabs). Use **`browser_task`** only for captcha / exploratory automation.
 
 ### `browser_task`: screenshots (what Grok should pass and expect)
 

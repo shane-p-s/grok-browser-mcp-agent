@@ -38,13 +38,45 @@ def _validate_prefill(prefill: list[Any]) -> str | None:
     return None
 
 
+def _pick_page_for_prefill(context: Any) -> Any | None:
+    """Prefer the hub's fresh about:blank tab; else the most recently attached page."""
+    pages = list(context.pages)
+    if not pages:
+        return None
+    blanks = [pg for pg in pages if (pg.url or "").startswith("about:")]
+    if len(blanks) == 1:
+        return blanks[0]
+    return pages[-1]
+
+
+async def _run_fills_on_page(page: Any, prefill: list[Any]) -> str | None:
+    for step in prefill:
+        assert isinstance(step, dict)
+        url = str(step["url"])
+        fills = step["fills"]
+        assert isinstance(fills, list)
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        for f in fills:
+            assert isinstance(f, dict)
+            sel = str(f["selector"])
+            name = str(f["secret_name"])
+            val = secrets_store.get_secret(name)
+            if val is None:
+                return f"unknown_or_missing_secret:{name}"
+            await page.fill(sel, val, timeout=30000)
+    return None
+
+
 async def run_secret_prefill(
     prefill: list[Any],
     headed: bool,
     user_data_dir: str | None,
+    *,
+    cdp_url: str | None = None,
 ) -> str | None:
     """
     Run Playwright fills locally. Returns error string or None on success.
+    When cdp_url is set, attaches to the shared browser hub (one Chrome window) instead of launching another.
     """
     err = _validate_prefill(prefill)
     if err:
@@ -55,6 +87,19 @@ async def run_secret_prefill(
     headless = not headed
     try:
         async with async_playwright() as p:
+            if (cdp_url or "").strip():
+                browser = await p.chromium.connect_over_cdp(cdp_url.strip())
+                try:
+                    if not browser.contexts:
+                        return "prefill_error:no_browser_context_on_cdp"
+                    ctx = browser.contexts[0]
+                    page = _pick_page_for_prefill(ctx)
+                    if page is None:
+                        page = await ctx.new_page()
+                    err = await _run_fills_on_page(page, prefill)
+                    return err
+                finally:
+                    await browser.close()
             browser = None
             if user_data_dir:
                 context = await p.chromium.launch_persistent_context(
@@ -67,20 +112,7 @@ async def run_secret_prefill(
             try:
                 pages = context.pages
                 page = pages[0] if pages else await context.new_page()
-                for step in prefill:
-                    assert isinstance(step, dict)
-                    url = str(step["url"])
-                    fills = step["fills"]
-                    assert isinstance(fills, list)
-                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    for f in fills:
-                        assert isinstance(f, dict)
-                        sel = str(f["selector"])
-                        name = str(f["secret_name"])
-                        val = secrets_store.get_secret(name)
-                        if val is None:
-                            return f"unknown_or_missing_secret:{name}"
-                        await page.fill(sel, val, timeout=30000)
+                return await _run_fills_on_page(page, prefill)
             finally:
                 await context.close()
                 if browser is not None:

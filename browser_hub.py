@@ -156,6 +156,64 @@ async def create_attached_session(*, headed: bool, user_data_dir: str | None) ->
     raise last_err
 
 
+def get_tab_record(tab_id: str) -> TabRecord | None:
+    return _tabs.get((tab_id or "").strip())
+
+
+async def open_granular_tab(
+    label: str,
+    *,
+    headed: bool,
+    user_data_dir: str | None,
+) -> tuple[str | None, str | None]:
+    """New tab for granular MCP tools (idle immediately; no Browser Use agent tab title)."""
+    from browser_use.browser.events import SwitchTabEvent
+
+    session = await create_attached_session(headed=headed, user_data_dir=user_data_dir)
+    page = await session.new_page("about:blank")
+    target_id = page._target_id
+    await session.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
+    tab_id = secrets.token_urlsafe(8)
+    text = (label or "grok_tab").strip()[:200] or "grok_tab"
+    async with _hub_lock:
+        _tabs[tab_id] = TabRecord(
+            tab_id=tab_id,
+            run_id="granular",
+            label=text,
+            target_id=target_id,
+            url="about:blank",
+            status="idle",
+        )
+    return tab_id, None
+
+
+async def attach_session_for_tab(tab_id: str) -> tuple[Any | None, str | None]:
+    """Attach to hub Chrome and focus a tracked tab."""
+    from browser_use.browser.events import SwitchTabEvent
+
+    tid = (tab_id or "").strip()
+    if not tid:
+        return None, "tab_id_required"
+    if not _cdp_url:
+        return None, "browser_hub_inactive_run_browser_task_first"
+    async with _hub_lock:
+        rec = _tabs.get(tid)
+        if not rec or rec.status == "closed":
+            return None, "tab_not_found_or_closed"
+        target_id = rec.target_id
+        headed = bool(_headed_launched)
+        udd = _user_data_dir
+    if not target_id:
+        return None, "tab_has_no_target_id"
+    try:
+        session = await create_attached_session(headed=headed, user_data_dir=udd)
+        await session.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
+        return session, None
+    except Exception as e:
+        logger.warning("attach_session_for_tab %s: %s", tid, e)
+        return None, f"attach_failed:{type(e).__name__}"
+
+
 async def open_tab_for_run(
     run_id: str,
     label: str,
@@ -245,6 +303,16 @@ async def sync_tab_metadata(tab_id: str, session: Any) -> None:
         rec.updated_at = time.time()
 
 
+def hub_cdp_url() -> str | None:
+    """WebSocket CDP URL for the shared Chromium (None if hub not started)."""
+    return _cdp_url
+
+
+def tab_target_id(tab_id: str) -> str | None:
+    rec = _tabs.get((tab_id or "").strip())
+    return rec.target_id if rec else None
+
+
 async def mark_tab_idle(tab_id: str, session: Any) -> None:
     await sync_tab_metadata(tab_id, session)
     async with _hub_lock:
@@ -323,7 +391,7 @@ def tabs_summary_for_status() -> dict[str, Any]:
         "browser_tabs_hint": (
             "Before opening a duplicate task, check browser_tabs (or list_browser_tabs). "
             "To continue on an existing idle tab, call browser_task with continue_tab_id=<tab_id>. "
-            "For a fast PNG without running the agent, use browser_capture_tab_screenshot(tab_id)."
+            "For step-by-step control use browser_open_tab / browser_navigate / browser_click; for PNG use browser_capture_tab_screenshot(tab_id)."
             if open_tabs
             else None
         ),
