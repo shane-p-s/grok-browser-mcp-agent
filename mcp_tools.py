@@ -226,19 +226,72 @@ def _secrets_misconfigured_response() -> dict[str, Any]:
     }
 
 
-def _build_screenshot_payload(raw_b64: str) -> dict[str, Any]:
-    """
-    Register a one-time HTTPS GET URL (PUBLIC_MCP_BASE_URL + /browser-screenshot/{token}).
-    PNG bytes are never embedded as base64 in MCP tool JSON (keeps payloads small and avoids client transport limits).
-    """
-    import base64
-    import binascii
+def _screenshot_register_max_bytes() -> int:
+    import screenshot_serve as ss
 
-    out: dict[str, Any] = {}
+    return ss._max_bytes()
+
+
+def _downscale_png_bytes_to_max_edge(data: bytes, max_edge: int) -> bytes | None:
+    """Fast lossy resize when raw PNG exceeds BROWSER_SCREENSHOT_MAX_BYTES. Returns None on failure."""
+    if max_edge <= 0 or not data:
+        return None
     try:
-        data = base64.b64decode(raw_b64, validate=True)
-    except (ValueError, binascii.Error):
-        return {"screenshot_note": "invalid_screenshot_base64"}
+        from io import BytesIO
+
+        from PIL import Image
+
+        im = Image.open(BytesIO(data))
+        w, h = im.size
+        if w <= max_edge and h <= max_edge:
+            buf = BytesIO()
+            im.save(buf, format="PNG")
+            return buf.getvalue()
+        if im.mode not in ("RGB", "RGBA"):
+            im = im.convert("RGBA")
+        im.thumbnail((max_edge, max_edge), Image.Resampling.BILINEAR)
+        buf = BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        logger.warning("screenshot PNG downscale failed", exc_info=True)
+        return None
+
+
+def _prepare_png_bytes_for_register(data: bytes) -> tuple[bytes, bool]:
+    """
+    Keep full CDP quality when the PNG fits BROWSER_SCREENSHOT_MAX_BYTES (default 12MB).
+    PIL resize runs only when the file is too large to register — not on every HiDPI capture.
+    Optional BROWSER_SCREENSHOT_DOWNSCALE_IF_RAW_BYTES_LARGER_THAN (>0) forces early resize for ops tuning.
+    """
+    if not data:
+        return data, False
+    max_b = _screenshot_register_max_bytes()
+    if len(data) <= max_b:
+        try:
+            threshold = int(os.getenv("BROWSER_SCREENSHOT_DOWNSCALE_IF_RAW_BYTES_LARGER_THAN", "0"))
+        except ValueError:
+            threshold = 0
+        if threshold <= 0 or len(data) <= threshold:
+            return data, False
+    raw_edge = (os.getenv("BROWSER_SCREENSHOT_MAX_EDGE") or "1920").strip()
+    try:
+        max_edge = int(raw_edge)
+    except ValueError:
+        max_edge = 1920
+    shrunk = _downscale_png_bytes_to_max_edge(data, max_edge)
+    if shrunk is not None:
+        return shrunk, True
+    return data, False
+
+
+def _screenshot_payload_from_png_bytes(data: bytes) -> dict[str, Any]:
+    """Write PNG bytes to one-time URL register; MCP JSON never includes image bytes."""
+    out: dict[str, Any] = {}
+    if not data:
+        return {"screenshot_note": "empty_screenshot_bytes"}
+
+    data, downscaled = _prepare_png_bytes_for_register(data)
 
     base = (os.getenv("PUBLIC_MCP_BASE_URL") or "").strip().rstrip("/")
     if not base:
@@ -257,7 +310,24 @@ def _build_screenshot_payload(raw_b64: str) -> dict[str, Any]:
     out["screenshot_url_single_use"] = True
     out["screenshot_url_ttl_seconds"] = int(os.getenv("BROWSER_SCREENSHOT_URL_TTL_SECONDS", "600"))
     out["screenshot_delivery"] = "url_only"
+    if downscaled:
+        out["screenshot_downscaled"] = True
     return out
+
+
+def _build_screenshot_payload(raw_b64: str) -> dict[str, Any]:
+    """
+    Register a one-time HTTPS GET URL (PUBLIC_MCP_BASE_URL + /browser-screenshot/{token}).
+    Accepts base64 only for browser-use step screenshots; decodes once then same path as raw bytes.
+    """
+    import base64
+    import binascii
+
+    try:
+        data = base64.b64decode(raw_b64, validate=True)
+    except (ValueError, binascii.Error):
+        return {"screenshot_note": "invalid_screenshot_base64"}
+    return _screenshot_payload_from_png_bytes(data)
 
 
 def _effective_browser_task(task: str, return_screenshot: bool) -> str:
@@ -664,27 +734,61 @@ def register_tools(mcp: FastMCP) -> None:
         }
 
     @mcp.tool()
-    async def browser_capture_tab_screenshot(tab_id: str) -> dict[str, Any]:
+    async def browser_capture_tab_screenshot(tab_id: str = "") -> dict[str, Any]:
         """
         Fast viewport PNG via CDP from a tracked tab (no Browser Use / DeepSeek). Completes in seconds.
-        Use browser_tab_id from a prior browser_task result or list_browser_tabs / get_status.
+        Pass tab_id from a prior browser_task result, list_browser_tabs, or get_status → browser_tabs.
+        If tab_id is omitted or empty and exactly one tab is unambiguous (single open tab, or single idle tab
+        among several), that tab is used; otherwise the tool returns ambiguous_tabs_specify_tab_id with browser_tabs.
         Returns screenshot_url when PUBLIC_MCP_BASE_URL is set (same one-time URL pattern as browser_task).
         """
         if (g := tool_gating.tool_disabled_error("browser_capture_tab_screenshot")) is not None:
             return g
-        b64, err = await browser_hub.capture_tab_viewport_png_b64(tab_id)
-        if err:
+        resolved, rerr, pick = browser_hub.resolve_tab_id_for_screenshot(tab_id)
+        if rerr:
             out: dict[str, Any] = {
+                "error": rerr,
+                "tab_id": (tab_id or "").strip() or None,
+            }
+            if rerr == "ambiguous_tabs_specify_tab_id":
+                out["browser_tabs"] = browser_hub.list_tabs(include_closed=False)[:25]
+                out["hint"] = "Pass tab_id for the tab you want (see browser_tabs)."
+            elif rerr == "no_open_tabs":
+                out["hint"] = "Run browser_task first, or call reset_browser_hub if Chromium was closed."
+            elif rerr == "no_tracked_tabs_in_hub":
+                out["hint"] = (
+                    "This MCP process has no browser tabs yet (restart clears tabs, or tab_id is from an older chat). "
+                    "Call browser_task or list_browser_tabs in this session, then use the tab_id from that response."
+                )
+            elif rerr == "tab_not_found_or_closed":
+                out["hint"] = "Use list_browser_tabs or get_status for current tab_id values."
+            return out
+        png_bytes, err = await browser_hub.capture_tab_viewport_png_bytes(resolved or "")
+        if err:
+            out = {
                 "error": "capture_failed",
                 "detail": err,
-                "tab_id": (tab_id or "").strip(),
+                "tab_id": resolved,
             }
+            if pick:
+                out["tab_id_pick_reason"] = pick
             if not (os.getenv("PUBLIC_MCP_BASE_URL") or "").strip():
                 out["hint"] = "Set PUBLIC_MCP_BASE_URL for screenshot_url after capture succeeds."
             return out
-        payload = _build_screenshot_payload(b64)
-        payload["tab_id"] = (tab_id or "").strip()
+        try:
+            payload = await asyncio.to_thread(_screenshot_payload_from_png_bytes, png_bytes)
+        except Exception as e:
+            logger.exception("browser_capture_tab_screenshot screenshot payload failed")
+            return {
+                "error": "screenshot_payload_build_failed",
+                "detail": type(e).__name__,
+                "tab_id": resolved,
+                "hint": "Check server logs; try adjusting BROWSER_SCREENSHOT_DOWNSCALE_IF_RAW_BYTES_LARGER_THAN.",
+            }
+        payload["tab_id"] = resolved
         payload["success"] = True
+        if pick:
+            payload["tab_id_pick_reason"] = pick
         return payload
 
     @mcp.tool()
@@ -726,7 +830,7 @@ def register_tools(mcp: FastMCP) -> None:
         By default each call opens a new tab. To avoid duplicate work, call list_browser_tabs or get_status first;
         if an idle tab already matches the goal, pass continue_tab_id (not a new tab). Tabs stay open when tasks end.
         Optional tab_label records purpose for list_browser_tabs. Use close_browser_tab when done with a tab.
-        For a screenshot only (no agent, fast), use browser_capture_tab_screenshot(tab_id) with browser_tab_id from a prior run or list_browser_tabs.
+        For a screenshot only (no agent, fast), use browser_capture_tab_screenshot (optional tab_id when only one tab matches) with browser_tab_id from a prior run or list_browser_tabs.
         Up to BROWSER_TASK_MAX_CONCURRENT (default 3) agents may run at once on different tabs.
         """
         if (g := tool_gating.tool_disabled_error("browser_task")) is not None:
@@ -995,7 +1099,7 @@ async def _browser_task_body_inner(
         browser_tab_id=browser_tab_id,
     )
     if return_screenshot and raw_shot:
-        screenshot_payload = _build_screenshot_payload(raw_shot)
+        screenshot_payload = await asyncio.to_thread(_build_screenshot_payload, raw_shot)
         _after_screenshot_built(screenshot_payload)
 
     headed_retry = False
@@ -1094,7 +1198,7 @@ async def _browser_task_body_inner(
                 browser_tab_id=browser_tab_id,
             )
             if return_screenshot and raw2:
-                screenshot_payload = _build_screenshot_payload(raw2)
+                screenshot_payload = await asyncio.to_thread(_build_screenshot_payload, raw2)
                 _after_screenshot_built(screenshot_payload)
             if err2 is None and h2 is not None:
                 memory_store.append_failure_hint(
@@ -1153,7 +1257,7 @@ async def _browser_task_body_inner(
             browser_tab_id=browser_tab_id,
         )
         if return_screenshot and raw2:
-            screenshot_payload = _build_screenshot_payload(raw2)
+            screenshot_payload = await asyncio.to_thread(_build_screenshot_payload, raw2)
             _after_screenshot_built(screenshot_payload)
         if err2 is None and h2 is not None:
             dom = domain_hints[0] if domain_hints else None

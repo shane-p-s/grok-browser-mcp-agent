@@ -254,6 +254,41 @@ async def mark_tab_idle(tab_id: str, session: Any) -> None:
             rec.updated_at = time.time()
 
 
+def resolve_tab_id_for_screenshot(tab_id: str | None) -> tuple[str | None, str | None, str | None]:
+    """
+    Pick a tab for browser_capture_tab_screenshot when tab_id is omitted.
+
+    Returns (resolved_tab_id, error_code, pick_reason). error_code is None on success.
+    pick_reason is set when an implicit pick was made (e.g. only one open tab).
+    """
+    raw = (tab_id or "").strip()
+    open_recs = [r for r in _tabs.values() if r.status != "closed"]
+    idle_recs = [r for r in open_recs if r.status == "idle"]
+    tid_out: str | None = None
+    err_out: str | None = None
+    pick_out: str | None = None
+    if raw:
+        if not open_recs:
+            err_out = "no_tracked_tabs_in_hub"
+        else:
+            rec = _tabs.get(raw)
+            if not rec or rec.status == "closed":
+                err_out = "tab_not_found_or_closed"
+            else:
+                tid_out = raw
+    elif not open_recs:
+        err_out = "no_open_tabs"
+    elif len(open_recs) == 1:
+        tid_out = open_recs[0].tab_id
+        pick_out = "picked_only_open_tab"
+    elif len(idle_recs) == 1:
+        tid_out = idle_recs[0].tab_id
+        pick_out = "picked_only_idle_tab"
+    else:
+        err_out = "ambiguous_tabs_specify_tab_id"
+    return tid_out, err_out, pick_out
+
+
 def list_tabs(*, include_closed: bool = False) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for rec in sorted(_tabs.values(), key=lambda r: r.created_at):
@@ -295,13 +330,11 @@ def tabs_summary_for_status() -> dict[str, Any]:
     }
 
 
-async def capture_tab_viewport_png_b64(tab_id: str) -> tuple[str | None, str | None]:
+async def capture_tab_viewport_png_bytes(tab_id: str) -> tuple[bytes | None, str | None]:
     """
     Focus tab and capture viewport via CDP (no Browser Use / DeepSeek).
-    Returns (standard base64 PNG string, error code) — error is None on success.
+    Returns raw PNG bytes (no base64); mcp_tools registers a one-time screenshot_url.
     """
-    import base64
-
     from browser_use.browser.events import SwitchTabEvent
 
     tid = (tab_id or "").strip()
@@ -323,18 +356,18 @@ async def capture_tab_viewport_png_b64(tab_id: str) -> tuple[str | None, str | N
         await session.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
         data = await session.take_screenshot()
     except Exception as e:
-        logger.warning("capture_tab_viewport_png_b64 %s: %s", tid, e)
+        logger.warning("capture_tab_viewport_png_bytes %s: %s", tid, e)
         return None, f"capture_failed:{type(e).__name__}"
     if not data:
         return None, "empty_screenshot"
-    try:
-        await sync_tab_metadata(tid, session)
-    except Exception:
-        pass
-    try:
-        return base64.b64encode(data).decode("ascii"), None
-    except Exception:
-        return None, "base64_encode_failed"
+    async def _sync_meta() -> None:
+        try:
+            await sync_tab_metadata(tid, session)
+        except Exception:
+            pass
+
+    asyncio.create_task(_sync_meta())
+    return data, None
 
 
 async def close_tab(tab_id: str) -> dict[str, Any]:

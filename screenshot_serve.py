@@ -24,17 +24,22 @@ def _max_bytes() -> int:
     return int(os.getenv("BROWSER_SCREENSHOT_MAX_BYTES", "12000000"))
 
 
+def _purge_expired_locked(now: float | None = None) -> None:
+    """Caller must hold _lock."""
+    t = time.time() if now is None else now
+    dead = [k for k, (_, exp) in _store.items() if exp < t]
+    for k in dead:
+        p, _ = _store.pop(k, (None, 0))
+        if p is not None:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError as e:
+                logger.debug("screenshot purge unlink: %s", e)
+
+
 def purge_expired() -> None:
-    now = time.time()
     with _lock:
-        dead = [k for k, (_, exp) in _store.items() if exp < now]
-        for k in dead:
-            p, _ = _store.pop(k, (None, 0))
-            if p is not None:
-                try:
-                    p.unlink(missing_ok=True)
-                except OSError as e:
-                    logger.debug("screenshot purge unlink: %s", e)
+        _purge_expired_locked()
 
 
 def register_png_bytes(data: bytes) -> str | None:
@@ -52,7 +57,7 @@ def register_png_bytes(data: bytes) -> str | None:
         return None
     exp = time.time() + _ttl_seconds()
     with _lock:
-        purge_expired()
+        _purge_expired_locked()
         _store[tok] = (path, exp)
     return tok
 
