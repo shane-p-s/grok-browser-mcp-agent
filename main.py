@@ -162,14 +162,24 @@ async def root(_):
             "health_live": "/health/live",
             "mcp": "/mcp/",
             "oauth_metadata": "/.well-known/oauth-authorization-server",
-            "browser_screenshot": "/browser-screenshot/{token} (GET; one-time PNG when PUBLIC_MCP_BASE_URL is set)",
+            "browser_screenshot": "/browser-screenshot/{token} (GET; one-time PNG when PUBLIC_MCP_BASE_URL is set; optional BROWSER_SCREENSHOT_REQUIRE_BEARER)",
         }
     )
 
 
 async def browser_screenshot(request):
-    """Serve a one-time browser_task PNG; not Bearer-gated (opaque token + TTL)."""
+    """
+    Serve a one-time browser_task PNG. By default only the opaque path token (+ TTL) is required.
+    Set BROWSER_SCREENSHOT_REQUIRE_BEARER=true to also require Authorization: Bearer (same rules as /mcp/).
+    """
     import screenshot_serve as ss
+
+    if (os.getenv("BROWSER_SCREENSHOT_REQUIRE_BEARER") or "").strip().lower() in ("1", "true", "yes", "on"):
+        from auth_middleware import verify_mcp_bearer_from_request
+
+        bad = verify_mcp_bearer_from_request(request)
+        if bad is not None:
+            return bad
 
     token = (request.path_params.get("token") or "").strip()
     ss.purge_expired()

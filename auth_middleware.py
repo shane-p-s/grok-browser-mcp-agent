@@ -57,6 +57,26 @@ def _parse_bearer(authorization_header: str | None) -> tuple[str | None, str | N
     return (None, token)
 
 
+def verify_mcp_bearer_from_request(request: Request) -> JSONResponse | None:
+    """
+    Same Bearer rules as BearerAuthMiddleware for one HTTP request.
+    Returns a JSONResponse (401 or 503) on failure, or None if the token is valid.
+    """
+    if not mcp_auth_configured():
+        return JSONResponse(
+            {
+                "detail": "Server misconfiguration: set AUTH_TOKEN and/or OAUTH_ENABLED with OAUTH_CLIENT_ID and OAUTH_JWT_SECRET."
+            },
+            status_code=503,
+        )
+    err, presented = _parse_bearer(request.headers.get("authorization"))
+    if err is not None or presented is None:
+        return JSONResponse({"detail": err or "Unauthorized"}, status_code=401)
+    if not verify_mcp_access_token(presented):
+        return JSONResponse({"detail": "Invalid bearer token"}, status_code=401)
+    return None
+
+
 class BearerAuthMiddleware:
     """ASGI wrapper: require Authorization: Bearer <AUTH_TOKEN or OAuth JWT> for all requests."""
 

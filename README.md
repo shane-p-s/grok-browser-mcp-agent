@@ -61,9 +61,9 @@ Each **`browser_task`** uses one shared Chrome instance (`keep_alive`). By defau
 
 ### `browser_task` screenshots (`return_screenshot`)
 
-You must pass **`return_screenshot=true`** in the tool call for **`screenshot_url`** / **`screenshot_base64`** to appear at all. **`PUBLIC_MCP_BASE_URL`** must match your Funnel origin. When the agent finishes with `done` and a bogus **`files_to_display`** (no real file), the server still attempts a **final CDP viewport** capture so Grok can get a PNG URL without relying on browser-use step screenshots.
+You must pass **`return_screenshot=true`** in the tool call for **`screenshot_url`** to appear at all. **`PUBLIC_MCP_BASE_URL`** must match your Funnel origin. The server never embeds PNG bytes as base64 in MCP tool JSON. When the agent finishes with `done` and a bogus **`files_to_display`** (no real file), the server still attempts a **final CDP viewport** capture so Grok can get a PNG URL without relying on browser-use step screenshots.
 
-When **`PUBLIC_MCP_BASE_URL`** is set to the same **`https://…`** origin Grok already uses for MCP (your Funnel URL, no path), successful captures return **`screenshot_url`** pointing at **`GET /browser-screenshot/{token}`** — a **one-time** full PNG response so the model is not fed multi‑megabyte base64 inside tool JSON. Tokens expire after **`BROWSER_SCREENSHOT_URL_TTL_SECONDS`** (default 600). Anyone who obtains the URL can download the image until it is consumed or expires; treat links as sensitive. Set **`BROWSER_SCREENSHOT_INCLUDE_BASE64=true`** if you also want a clipped inline **`screenshot_base64`** (see **`BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS`**). Without **`PUBLIC_MCP_BASE_URL`**, behavior is inline base64 only (capped as before). **`get_status`** reports **`public_mcp_base_url_configured`**.
+When **`PUBLIC_MCP_BASE_URL`** is set to the same **`https://…`** origin Grok already uses for MCP (your Funnel URL, no path), successful captures return **`screenshot_url`** pointing at **`GET /browser-screenshot/{token}`** — a **one-time** full PNG response (`Cache-Control: no-store`). Tokens expire after **`BROWSER_SCREENSHOT_URL_TTL_SECONDS`** (default 600). By default anyone who obtains the URL can download the image until it is consumed or expires; treat links as sensitive. Set **`BROWSER_SCREENSHOT_REQUIRE_BEARER=true`** so that GET also requires **`Authorization: Bearer …`** with the same token rules as **`/mcp/`** (opaque URL alone is then insufficient). **`get_status`** reports **`public_mcp_base_url_configured`**. Without **`PUBLIC_MCP_BASE_URL`**, the tool returns a **`screenshot_note`** explaining that **`screenshot_url`** cannot be built.
 
 ### Fast screenshot only (`browser_capture_tab_screenshot`)
 
@@ -83,10 +83,11 @@ Start with `ping`, `get_status`, then expand as needed. For **`cursor_agent`**, 
 
 ### Grok: login page screenshot + operator secrets (read this)
 
-1. Call **`get_status`** first and read **`grok_connector_hints`** — it tells you if **`SECRETS_MASTER_KEY`**, **`PUBLIC_MCP_BASE_URL`**, or **`BROWSER_SCREENSHOT_INCLUDE_BASE64`** are misconfigured for your use case.
-2. **Screenshot of the current tab:** `browser_task(..., return_screenshot=true)` **or** `browser_capture_tab_screenshot(tab_id)` after `list_browser_tabs`. Without **`PUBLIC_MCP_BASE_URL`**, you will not get **`screenshot_url`**. Many Grok builds **do not automatically fetch `screenshot_url`**; set **`BROWSER_SCREENSHOT_INCLUDE_BASE64=true`** in `.env` so **`screenshot_base64`** appears in the tool JSON for the model to see.
+1. Call **`get_status`** first and read **`grok_connector_hints`** — it tells you if **`SECRETS_MASTER_KEY`**, **`PUBLIC_MCP_BASE_URL`**, or screenshot Bearer lockdown are relevant.
+2. **Screenshot of the current tab:** `browser_task(..., return_screenshot=true)` **or** `browser_capture_tab_screenshot(tab_id)` after `list_browser_tabs`. Without **`PUBLIC_MCP_BASE_URL`**, you will not get **`screenshot_url`**. The connector (or a follow-up **`fetch_url`**) must **HTTPS GET** that URL so Grok can attach or analyze the PNG; when **`BROWSER_SCREENSHOT_REQUIRE_BEARER=true`**, include the same **`Authorization: Bearer …`** as for MCP.
 3. **Operator-entered password (never in `task` text):** with **`SECRETS_MASTER_KEY`** set, restart MCP, call **`request_user_secret`**, operator opens **`submit_url`** on the PC, then use **`secret_prefill`** in **`browser_task`** with stored names. If your connector uses an explicit **`allowed_tools`** list, include **`request_user_secret`** there.
 4. If the connector reports vague “initialization / transport” errors for some tools but **`ping`** works, that is often **xAI’s MCP client** or **missing `allowed_tools`** — not your PC; still verify **`get_status`** and server logs.
+5. **Transport size:** keeping screenshots at **`screenshot_url`** avoids multi‑megabyte **`tools/call`** payloads that some MCP clients reject.
 
 ### Grok connector: `Authorization` header
 
@@ -181,7 +182,7 @@ If the icon is hidden, open the **^** overflow next to the clock and drag the ic
 - Default is **headless**. Per-domain memory may switch to **headed** after friction or operator preference.
 - Env **`BROWSER_HEADED=true`** or per-call **`headed=true`** still apply when no domain memory overrides.
 - **`BROWSER_USER_DATA_DIR`**: optional Playwright user-data dir for **persistent cookies** across `browser_task` runs (create the directory beforehand or let the server create it).
-- **`browser_task(..., return_screenshot=true)`** with **`PUBLIC_MCP_BASE_URL`**: prefer **`screenshot_url`** (HTTPS one-time GET for full PNG). Without public base, or with **`BROWSER_SCREENSHOT_INCLUDE_BASE64`**, may return capped **`screenshot_base64`**; **`screenshot_note`** explains omission.
+- **`browser_task(..., return_screenshot=true)`** with **`PUBLIC_MCP_BASE_URL`**: returns **`screenshot_url`** (HTTPS one-time GET for full PNG). Without public base, **`screenshot_note`** explains omission; there is no inline-base64 fallback.
 - **Headed automation needs an interactive logged-in Windows session.** Lock screen or another user’s session often breaks Playwright/Chromium UI.
 
 ### Run logs (for Grok debugging)

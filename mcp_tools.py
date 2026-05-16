@@ -86,12 +86,6 @@ def _mcp_json_response_flag() -> bool:
 def _grok_connector_hints() -> dict[str, Any]:
     """Actionable flags for Grok / xAI MCP clients (screenshots + secrets)."""
     pub = bool((os.getenv("PUBLIC_MCP_BASE_URL") or "").strip())
-    inline_b64 = (os.getenv("BROWSER_SCREENSHOT_INCLUDE_BASE64") or "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
     secret_ok = secrets_store.master_key_configured()
     hints: list[str] = []
     if not secret_ok:
@@ -100,22 +94,21 @@ def _grok_connector_hints() -> dict[str, Any]:
         )
     if not pub:
         hints.append(
-            "PUBLIC_MCP_BASE_URL unset: no screenshot_url. Set it to https://<same-host-as-MCP> and use return_screenshot=true "
-            "on browser_task (or browser_capture_tab_screenshot)."
-        )
-    elif not inline_b64:
-        hints.append(
-            "If Grok never displays PNGs: set BROWSER_SCREENSHOT_INCLUDE_BASE64=true so screenshot_base64 appears in tool JSON, "
-            "or HTTPS GET screenshot_url with Authorization: Bearer <same token as MCP>."
+            "Set PUBLIC_MCP_BASE_URL=https://<same-host-as-MCP> (no path). Screenshots are never inlined in MCP JSON; "
+            "the tool returns screenshot_url only — Grok (or a follow-up fetch_url) must HTTPS GET that URL to obtain the PNG."
         )
     else:
-        hints.append("BROWSER_SCREENSHOT_INCLUDE_BASE64 is on; expect clipped screenshot_base64 in tool results.")
+        hints.append(
+            "Screenshots use screenshot_url only (no base64 in tool JSON). For vision, HTTPS GET the URL "
+            "(same origin as MCP; one-time token). Optional: BROWSER_SCREENSHOT_REQUIRE_BEARER=true requires "
+            "the same Authorization: Bearer as MCP on GET /browser-screenshot/… so a leaked URL alone is not enough."
+        )
     hints.append(
         "If the connector uses an explicit allowed_tools list, include every tool you need (copy grok_allowed_tools_csv from get_status) or leave the list empty when the client allows all tools."
     )
     return {
         "grok_connector_hints": hints,
-        "screenshot_inline_base64_enabled": inline_b64,
+        "screenshot_delivery": "screenshot_url_only",
     }
 
 
@@ -206,18 +199,10 @@ def _secrets_misconfigured_response() -> dict[str, Any]:
     }
 
 
-def _clip_screenshot_base64(b64: str) -> tuple[str | None, str | None]:
-    """Cap screenshot payload size for MCP clients. Returns (data, None) or (None, reason)."""
-    max_chars = int(os.getenv("BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS", "700000"))
-    if max_chars <= 0 or len(b64) <= max_chars:
-        return b64, None
-    return None, f"screenshot_too_large_base64_chars={len(b64)}_max={max_chars}"
-
-
 def _build_screenshot_payload(raw_b64: str) -> dict[str, Any]:
     """
-    Prefer PUBLIC_MCP_BASE_URL + one-time GET /browser-screenshot/{token} so clients fetch the full PNG
-    instead of embedding megabytes of base64 in JSON. Set BROWSER_SCREENSHOT_INCLUDE_BASE64=true to also inline.
+    Register a one-time HTTPS GET URL (PUBLIC_MCP_BASE_URL + /browser-screenshot/{token}).
+    PNG bytes are never embedded as base64 in MCP tool JSON (keeps payloads small and avoids client transport limits).
     """
     import base64
     import binascii
@@ -229,35 +214,22 @@ def _build_screenshot_payload(raw_b64: str) -> dict[str, Any]:
         return {"screenshot_note": "invalid_screenshot_base64"}
 
     base = (os.getenv("PUBLIC_MCP_BASE_URL") or "").strip().rstrip("/")
-    include_b64 = (os.getenv("BROWSER_SCREENSHOT_INCLUDE_BASE64") or "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-    url_ok = False
-    if base:
-        import screenshot_serve as ss
+    if not base:
+        out["screenshot_note"] = "set_PUBLIC_MCP_BASE_URL_https_same_origin_as_MCP_no_path_for_screenshot_url"
+        out["screenshot_delivery"] = "none_missing_public_mcp_base_url"
+        return out
 
-        tok = ss.register_png_bytes(data)
-        if tok:
-            out["screenshot_url"] = f"{base}/browser-screenshot/{tok}"
-            out["screenshot_url_single_use"] = True
-            out["screenshot_url_ttl_seconds"] = int(os.getenv("BROWSER_SCREENSHOT_URL_TTL_SECONDS", "600"))
-            url_ok = True
-        else:
-            out["screenshot_note"] = "png_too_large_for_url_register_see_BROWSER_SCREENSHOT_MAX_BYTES"
+    import screenshot_serve as ss
 
-    if (not url_ok) or include_b64:
-        cb, note = _clip_screenshot_base64(raw_b64)
-        if cb:
-            out["screenshot_base64"] = cb
-            out["screenshot_mime"] = "image/png"
-        if note:
-            prev = out.get("screenshot_note")
-            out["screenshot_note"] = f"{prev};{note}" if prev else note
-    elif url_ok:
-        out["screenshot_delivery"] = "url_only_no_inline_base64"
+    tok = ss.register_png_bytes(data)
+    if not tok:
+        out["screenshot_note"] = "png_too_large_for_url_register_see_BROWSER_SCREENSHOT_MAX_BYTES"
+        return out
+
+    out["screenshot_url"] = f"{base}/browser-screenshot/{tok}"
+    out["screenshot_url_single_use"] = True
+    out["screenshot_url_ttl_seconds"] = int(os.getenv("BROWSER_SCREENSHOT_URL_TTL_SECONDS", "600"))
+    out["screenshot_delivery"] = "url_only"
     return out
 
 
@@ -284,7 +256,7 @@ def _effective_browser_task(task: str, return_screenshot: bool) -> str:
         "the server captures the viewport over CDP when the run finishes. "
         "Stay on the final product page. "
         "Explicitly select required size/color options (do not assume defaults). "
-        "The MCP tool result will include screenshot_url (HTTPS PNG), not a local file path.]"
+        "The MCP tool result will include screenshot_url (HTTPS one-time GET), not embedded image bytes or local file paths.]"
     )
 
 
@@ -669,8 +641,7 @@ def register_tools(mcp: FastMCP) -> None:
         """
         Fast viewport PNG via CDP from a tracked tab (no Browser Use / DeepSeek). Completes in seconds.
         Use browser_tab_id from a prior browser_task result or list_browser_tabs / get_status.
-        Returns screenshot_url when PUBLIC_MCP_BASE_URL is set; add BROWSER_SCREENSHOT_INCLUDE_BASE64=true if the
-        MCP client does not fetch URLs. Same Bearer as MCP applies to GET screenshot_url when fetching manually.
+        Returns screenshot_url when PUBLIC_MCP_BASE_URL is set (same one-time URL pattern as browser_task).
         """
         if (g := tool_gating.tool_disabled_error("browser_capture_tab_screenshot")) is not None:
             return g
@@ -706,9 +677,8 @@ def register_tools(mcp: FastMCP) -> None:
         """
         Run a natural-language web automation task using Browser Use with DeepSeek (OpenAI-compatible API).
 
-        For Grok to show a login page image: pass return_screenshot=true; set PUBLIC_MCP_BASE_URL on the server;
-        many clients need BROWSER_SCREENSHOT_INCLUDE_BASE64=true so screenshot_base64 is in the tool JSON, or the
-        client must HTTPS GET screenshot_url with the same Bearer token as MCP.
+        For Grok vision of the page: pass return_screenshot=true and set PUBLIC_MCP_BASE_URL on the server; the tool
+        returns screenshot_url (HTTPS one-time GET). Images are not embedded in MCP JSON — the client must fetch the URL.
 
         Default is headless; per-domain memory may force headed. After a headless run, the server may retry
         once in headed mode if step notes or the final result look like bot/login/Cloudflare friction (do not
@@ -719,11 +689,8 @@ def register_tools(mcp: FastMCP) -> None:
         locally before the agent runs so values are not sent to the LLM. URLs must be https://. Never put
         raw secret values in task (task is sent to DeepSeek); reference stored names only.
 
-        If return_screenshot=true, when a viewport PNG is available the tool prefers a short-lived HTTPS URL
-        (GET /browser-screenshot/{token}) when PUBLIC_MCP_BASE_URL matches your Funnel origin — Grok fetches the
-        full image without megabytes of base64 in JSON. Optional BROWSER_SCREENSHOT_INCLUDE_BASE64=true also inlines
-        clipped base64 (BROWSER_TASK_SCREENSHOT_MAX_BASE64_CHARS, default 700000). Without PUBLIC_MCP_BASE_URL,
-        behavior matches the legacy inline path only.
+        If return_screenshot=true, when a viewport PNG is available the tool returns a short-lived HTTPS URL
+        (GET /browser-screenshot/{token}) when PUBLIC_MCP_BASE_URL matches your Funnel origin.
 
         IMPORTANT: Pass return_screenshot=true for screenshot_url (and set PUBLIC_MCP_BASE_URL). If return_screenshot
         is omitted, no screenshot fields are returned. The server also runs a final CDP viewport capture when the agent
