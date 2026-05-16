@@ -49,6 +49,12 @@ _DEFAULT_BROWSER_MAX_STEPS = int(os.getenv("BROWSER_TASK_MAX_STEPS", "40"))
 _HEADED_RETRY_KEYS = (
     "captcha",
     "cloudflare",
+    "turnstile",
+    "just a moment",
+    "checking your browser",
+    "security verification",
+    "ddos protection",
+    "checking if the site connection is secure",
     "access denied",
     "sign in",
     "log in",
@@ -67,12 +73,50 @@ _HEADED_RETRY_KEYS = (
     "cf-ray",
     "attention required",
     "enable javascript",
+    "ray id",
+    "one more step",
 )
 
 
 def _mcp_json_response_flag() -> bool:
     v = os.getenv("MCP_JSON_RESPONSE", "true").strip().lower()
     return v in ("1", "true", "yes", "on")
+
+
+def _grok_connector_hints() -> dict[str, Any]:
+    """Actionable flags for Grok / xAI MCP clients (screenshots + secrets)."""
+    pub = bool((os.getenv("PUBLIC_MCP_BASE_URL") or "").strip())
+    inline_b64 = (os.getenv("BROWSER_SCREENSHOT_INCLUDE_BASE64") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    secret_ok = secrets_store.master_key_configured()
+    hints: list[str] = []
+    if not secret_ok:
+        hints.append(
+            "request_user_secret returns secrets_not_configured until SECRETS_MASTER_KEY is set in .env; restart MCP."
+        )
+    if not pub:
+        hints.append(
+            "PUBLIC_MCP_BASE_URL unset: no screenshot_url. Set it to https://<same-host-as-MCP> and use return_screenshot=true "
+            "on browser_task (or browser_capture_tab_screenshot)."
+        )
+    elif not inline_b64:
+        hints.append(
+            "If Grok never displays PNGs: set BROWSER_SCREENSHOT_INCLUDE_BASE64=true so screenshot_base64 appears in tool JSON, "
+            "or HTTPS GET screenshot_url with Authorization: Bearer <same token as MCP>."
+        )
+    else:
+        hints.append("BROWSER_SCREENSHOT_INCLUDE_BASE64 is on; expect clipped screenshot_base64 in tool results.")
+    hints.append(
+        "If the connector uses an explicit allowed_tools list, include every tool you need (copy grok_allowed_tools_csv from get_status) or leave the list empty when the client allows all tools."
+    )
+    return {
+        "grok_connector_hints": hints,
+        "screenshot_inline_base64_enabled": inline_b64,
+    }
 
 
 def _resolve_browser_headed(task: str, headed: bool | None) -> tuple[bool, list[str]]:
@@ -220,6 +264,16 @@ def _build_screenshot_payload(raw_b64: str) -> dict[str, Any]:
 def _effective_browser_task(task: str, return_screenshot: bool) -> str:
     """Steer browser-use away from PDF-as-screenshot when MCP will return screenshot_url."""
     t = task.strip()
+    rel = (
+        "[MCP reliability: A long-running browser_task does not mean Tailscale or MCP is broken if "
+        "ping/get_status still succeed. Bot walls (Cloudflare, Turnstile, 'verify you are human', "
+        "'checking your browser') usually need headed=true on the next browser_task call "
+        "(reuse continue_tab_id from list_browser_tabs when the tab is idle), or complete the "
+        "challenge once in a headed window. If the operator fully closed Chromium and tools fail to attach, "
+        "call reset_browser_hub once then browser_task again (the server also auto-detects a dead CDP port).]"
+    )
+    if rel not in t:
+        t = f"{t}\n\n{rel}"
     if not return_screenshot:
         return t
     marker = "[MCP screenshot delivery:"
@@ -359,6 +413,7 @@ def register_tools(mcp: FastMCP) -> None:
             "get_status",
             "list_browser_tabs",
             "close_browser_tab",
+            "reset_browser_hub",
             "browser_capture_tab_screenshot",
         ]
         mem = memory_store.memory_summary_for_status()
@@ -387,6 +442,9 @@ def register_tools(mcp: FastMCP) -> None:
             **browser_hub.tabs_summary_for_status(),
             "mcp_disabled_tools_raw": (os.getenv("MCP_DISABLED_TOOLS") or "").strip() or None,
             "tools": tools,
+            # Single-line copy-paste for Grok "allowed tools" when the connector requires an explicit list
+            "grok_allowed_tools_csv": ",".join(tools),
+            **_grok_connector_hints(),
         }
 
     @mcp.tool()
@@ -542,6 +600,9 @@ def register_tools(mcp: FastMCP) -> None:
         Start a short-lived HTTP form on 127.0.0.1 only so the operator can submit a secret once; value is
         encrypted locally (SECRETS_MASTER_KEY). Open submit_url on this PC in a browser. Never paste raw
         secrets into browser_task task text (that string is sent to DeepSeek).
+
+        Requires SECRETS_MASTER_KEY in .env and MCP restart; otherwise returns secrets_not_configured. The Grok
+        connector must list this tool in allowed_tools. After save, use secret_prefill in browser_task with the same name.
         """
         if (g := tool_gating.tool_disabled_error("request_user_secret")) is not None:
             return g
@@ -574,6 +635,7 @@ def register_tools(mcp: FastMCP) -> None:
     async def list_browser_tabs(include_closed: bool = False) -> dict[str, Any]:
         """
         List tabs opened by browser_task on the shared Chrome instance (still open on your PC until you close them).
+        If you closed Chromium manually and automation fails, call reset_browser_hub then browser_task again.
         Each tab has tab_id, run_id, label (Grok's stated purpose), status (running|idle|closed), url, title.
         """
         if (g := tool_gating.tool_disabled_error("list_browser_tabs")) is not None:
@@ -588,11 +650,27 @@ def register_tools(mcp: FastMCP) -> None:
         return await browser_hub.close_tab(tab_id)
 
     @mcp.tool()
+    async def reset_browser_hub() -> dict[str, Any]:
+        """
+        Clear the shared Chromium CDP connection and in-memory tab list (e.g. after you closed the browser
+        window manually, or automation cannot attach). The next browser_task starts a fresh Chromium instance.
+        Old tab_id values are no longer valid.
+        """
+        if (g := tool_gating.tool_disabled_error("reset_browser_hub")) is not None:
+            return g
+        await browser_hub.force_reset_browser_hub("mcp_reset_browser_hub")
+        return {
+            "ok": True,
+            "hint": "Call browser_task again; list_browser_tabs will be empty until a new tab is opened.",
+        }
+
+    @mcp.tool()
     async def browser_capture_tab_screenshot(tab_id: str) -> dict[str, Any]:
         """
         Fast viewport PNG via CDP from a tracked tab (no Browser Use / DeepSeek). Completes in seconds.
         Use browser_tab_id from a prior browser_task result or list_browser_tabs / get_status.
-        Returns screenshot_url (and optional screenshot_base64) like browser_task when PUBLIC_MCP_BASE_URL is set.
+        Returns screenshot_url when PUBLIC_MCP_BASE_URL is set; add BROWSER_SCREENSHOT_INCLUDE_BASE64=true if the
+        MCP client does not fetch URLs. Same Bearer as MCP applies to GET screenshot_url when fetching manually.
         """
         if (g := tool_gating.tool_disabled_error("browser_capture_tab_screenshot")) is not None:
             return g
@@ -627,9 +705,15 @@ def register_tools(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """
         Run a natural-language web automation task using Browser Use with DeepSeek (OpenAI-compatible API).
+
+        For Grok to show a login page image: pass return_screenshot=true; set PUBLIC_MCP_BASE_URL on the server;
+        many clients need BROWSER_SCREENSHOT_INCLUDE_BASE64=true so screenshot_base64 is in the tool JSON, or the
+        client must HTTPS GET screenshot_url with the same Bearer token as MCP.
+
         Default is headless; per-domain memory may force headed. After a headless run, the server may retry
-        once in headed mode if the result looks like bot/login/captcha friction. Set BROWSER_USER_DATA_DIR
-        for persistent cookies. Requires DEEPSEEK_API_KEY.
+        once in headed mode if step notes or the final result look like bot/login/Cloudflare friction (do not
+        assume MCP or Tailscale is down while POST /mcp/ returns 200). For sites with verification interstitials,
+        pass headed=true early. Set BROWSER_USER_DATA_DIR for persistent cookies. Requires DEEPSEEK_API_KEY.
 
         Optional secret_prefill: list of {url, fills:[{selector, secret_name}]} — Playwright fills secrets
         locally before the agent runs so values are not sent to the LLM. URLs must be https://. Never put
@@ -968,7 +1052,13 @@ async def _browser_task_body_inner(
                 "error": "timeout",
                 "timeout_seconds": to,
                 "max_steps": ms,
-                "hint": "Retry with a narrower task or higher timeout_seconds (up to 900).",
+                "hint": (
+                    "Retry with a narrower task or higher timeout_seconds (up to 900). "
+                    "If the page may be behind Cloudflare or a bot check, retry with headed=true "
+                    "(same continue_tab_id if list_browser_tabs shows that tab idle). "
+                    "MCP returning 200/202 means the connector reached this PC; do not blame Tailscale "
+                    "unless ping or get_status also fail."
+                ),
                 "headed": headed_eff,
                 "headed_retry": False,
                 "domain_hints": domain_hints,

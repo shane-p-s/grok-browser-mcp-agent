@@ -16,7 +16,7 @@ Remote **`GET /health`** only proves **something** answered on the funnel URL; *
 - **Tailscale disconnected** — funnel endpoints go away or flap. Check Tailscale on the PC is **Connected**.
 - **Uvicorn exited or wedged** — run **`restart-mcp.bat`** (stops then starts; pin it to the taskbar) or **`.\stop.ps1`** then **`.\start.ps1`**. **`stop.ps1`** kills whatever is **LISTEN**ing on **`PORT`** (default **8765**) when **Ctrl+C** does not work.
 
-**One-click restart (pin to taskbar):** in the repo folder, use **`restart-mcp.bat`**. For a **system tray** icon with **no foreground console**, use **`mcp-tray.bat`** instead (see [System tray](#system-tray-windows--no-powershell-window) below). Right‑click **`restart-mcp.bat`** → **Show more options** → **Pin to taskbar** (Windows 10/11), or create a shortcut to **`restart-mcp.bat`** and pin the shortcut. No need to `cd` manually; scripts use their own folder.
+**One-click restart (pin to taskbar):** in the repo folder, use **`restart-mcp.bat`**. For a **system tray** launcher with **no manual pip step**, use **`mcp-tray.bat`** (or pin **`Grok-PC-MCP.exe`** — [build it once](#grok-pc-mcpexe-taskbar-pin)). **`mcp-tray.bat`** frees **PORT** first, then starts the tray; the tray clears **PORT** again before each uvicorn start. A **second launch** exits quietly if the tray is already running. Right‑click **`restart-mcp.bat`** → **Show more options** → **Pin to taskbar** (Windows 10/11), or create a shortcut to **`restart-mcp.bat`** and pin the shortcut. No need to `cd` manually; scripts use their own folder.
 - **`browser_task` load** — long runs + Playwright/Chrome can stress RAM; orphan Chromium after a force-kill may linger. Close extra Chrome windows; lower **`BROWSER_TASK_MAX_CONCURRENT`** if needed.
 
 **`Ctrl+C` on Windows** sometimes does not stop uvicorn (focus, console host, or blocked process). Prefer **`restart-mcp.bat`**, **`.\stop.ps1`**, or closing the window after **`stop.ps1`**.
@@ -42,6 +42,7 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 | `browser_task` | **Browser Use** + **DeepSeek** (`DEEPSEEK_API_KEY`); default **headless**, per-domain memory; optional **headed** retry; **`secret_prefill`** / **`BROWSER_USER_DATA_DIR`** as before; **shared Chrome** — new tab or **`continue_tab_id`**, optional **`tab_label`**; **`return_screenshot=true`** + **`PUBLIC_MCP_BASE_URL`** → **`screenshot_url`**; see sections below |
 | `list_browser_tabs` | Open automation tabs: **`tab_id`**, **`label`**, **`status`**, **`url`**, **`title`** |
 | `close_browser_tab` | Close a tab by **`tab_id`** |
+| `reset_browser_hub` | Clear stale shared-Chromium state if you **closed the browser window** or attach fails; next **`browser_task`** launches fresh Chromium (**old `tab_id` values invalid**) |
 | `browser_capture_tab_screenshot` | **CDP-only** viewport PNG in seconds — pass **`tab_id`**; returns **`screenshot_url`** like **`browser_task`** (no LLM; use when Grok times out on long **`browser_task`**) |
 | `cursor_agent` | [Cursor Agent CLI](https://cursor.com/docs/cli/headless): **`capability_level`** 1=`ask`, 2=`plan` (default), 3=`agent`+`--force` only after **`approve_cursor_writes`** for that workspace; returns **`run_id`** |
 | `approve_cursor_writes` | Persist Level 3 (apply) for one workspace; set **`always_allow_level_3_rule=true`** for a durable “always allow” rule until **`revoke_cursor_writes`** |
@@ -56,7 +57,7 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 
 ### `browser_task` tabs (shared Chrome)
 
-Each **`browser_task`** uses one shared Chrome instance (`keep_alive`). By default it opens a **new tab**; pass **`continue_tab_id`** (from **`list_browser_tabs`** or **`get_status`** → `browser_tabs`) to **resume an idle tab** instead of duplicating work. When a task ends, the tab **stays open** (`status: idle`) with its **`tab_label`** so Grok can see what each tab was for. **`get_status`** and **`list_browser_tabs`** expose open tabs; Grok should check those before starting a similar task again. Use **`close_browser_tab(tab_id)`** when finished. Up to **`BROWSER_TASK_MAX_CONCURRENT`** (default **3**) agents may run at once on different tabs.
+Each **`browser_task`** uses one shared Chrome instance (`keep_alive`). By default it opens a **new tab**; pass **`continue_tab_id`** (from **`list_browser_tabs`** or **`get_status`** → `browser_tabs`) to **resume an idle tab** instead of duplicating work. When a task ends, the tab **stays open** (`status: idle`) with its **`tab_label`** so Grok can see what each tab was for. **`get_status`** and **`list_browser_tabs`** expose open tabs; Grok should check those before starting a similar task again. Use **`close_browser_tab(tab_id)`** when finished. If you **closed Chromium manually** and tools fail, the server **auto-detects a dead CDP port** on the next call; you can also call **`reset_browser_hub`** then **`browser_task`** again. Up to **`BROWSER_TASK_MAX_CONCURRENT`** (default **3**) agents may run at once on different tabs.
 
 ### `browser_task` screenshots (`return_screenshot`)
 
@@ -70,7 +71,22 @@ If Grok’s MCP client **drops long `browser_task` calls** but **`get_status` st
 
 ### Grok `allowed_tools`
 
-Start with `ping`, `get_status`, then `fetch_url`, then expand. For **`cursor_agent`**, default **`capability_level=2`** (plan / propose). **Level 3** requires **`approve_cursor_writes`** (or **`always_allow_level_3_rule`**) for that workspace on the PC.
+**Empty list:** Many connectors treat an **empty** “allowed tools” field as **allow all** registered tools — if **`ping`** and **`get_status`** already work, you often **do not** need to list anything.
+
+**If your client only calls a subset or flakes on some tools:** paste the full comma-separated list (same order as `get_status` → **`tools`**, or copy **`grok_allowed_tools_csv`** from a `get_status` response after MCP restart):
+
+```text
+ping,fetch_url,github_get_file,github_list_repo_files,github_get_diff,github_create_issue,request_user_secret,list_secrets,revoke_secret,browser_task,cursor_agent,approve_cursor_writes,revoke_cursor_writes,get_run_log,list_recent_runs,get_status,list_browser_tabs,close_browser_tab,reset_browser_hub,browser_capture_tab_screenshot
+```
+
+Start with `ping`, `get_status`, then expand as needed. For **`cursor_agent`**, default **`capability_level=2`** (plan / propose). **Level 3** requires **`approve_cursor_writes`** (or **`always_allow_level_3_rule`**) for that workspace on the PC.
+
+### Grok: login page screenshot + operator secrets (read this)
+
+1. Call **`get_status`** first and read **`grok_connector_hints`** — it tells you if **`SECRETS_MASTER_KEY`**, **`PUBLIC_MCP_BASE_URL`**, or **`BROWSER_SCREENSHOT_INCLUDE_BASE64`** are misconfigured for your use case.
+2. **Screenshot of the current tab:** `browser_task(..., return_screenshot=true)` **or** `browser_capture_tab_screenshot(tab_id)` after `list_browser_tabs`. Without **`PUBLIC_MCP_BASE_URL`**, you will not get **`screenshot_url`**. Many Grok builds **do not automatically fetch `screenshot_url`**; set **`BROWSER_SCREENSHOT_INCLUDE_BASE64=true`** in `.env` so **`screenshot_base64`** appears in the tool JSON for the model to see.
+3. **Operator-entered password (never in `task` text):** with **`SECRETS_MASTER_KEY`** set, restart MCP, call **`request_user_secret`**, operator opens **`submit_url`** on the PC, then use **`secret_prefill`** in **`browser_task`** with stored names. If your connector uses an explicit **`allowed_tools`** list, include **`request_user_secret`** there.
+4. If the connector reports vague “initialization / transport” errors for some tools but **`ping`** works, that is often **xAI’s MCP client** or **missing `allowed_tools`** — not your PC; still verify **`get_status`** and server logs.
 
 ### Grok connector: `Authorization` header
 
@@ -134,11 +150,23 @@ Defaults: **`HOST=127.0.0.1`** in [`main.py`](main.py) `__main__` when using env
 
 ### System tray (Windows — no PowerShell window)
 
-For a **native-style** setup, run **[`mcp-tray.bat`](mcp-tray.bat)** after `pip install -r requirements.txt` (includes **`pystray`** and **`pillow`**). The batch file prefers **`pythonw.exe`** from your **`.venv`** so **neither** uvicorn nor the tray helper keeps a **console window** open. A **notification area** icon appears; **right‑click** for **Restart MCP**, **Stop MCP**, **Open repo folder**, **Open server log** (`logs/mcp-server.log`), and **Exit** (stops the server and closes the tray). Uvicorn and **`stop.ps1`** are spawned **without** extra console windows (`CREATE_NO_WINDOW`).
+**Easiest:** double‑click **`mcp-tray.bat`**. It runs **`stop.ps1`** (frees **PORT**) and then starts the supervisor — **no separate `pip install` step**: [`mcp_tray.py`](mcp_tray.py) creates **`.venv`** if needed and **`pip install -r requirements.txt`**. The tray icon may take **longer on the very first run** while it optionally builds **`Grok-PC-MCP.exe`** for taskbar pinning (see below); progress is logged to **`logs/tray-exe-build.log`**.
 
-If the icon never appears (e.g. missing deps), run **`python mcp_tray.py`** once in PowerShell to see the error, then **`pip install pystray pillow`**.
+If **`Grok-PC-MCP.exe`** exists in the repo folder, the batch file launches that **instead** of `pythonw` — same folder must contain **`main.py`**, **`stop.ps1`**, and **`.env`**.
 
-Run **only one** tray instance (or one `start.ps1` / manual uvicorn) so **`PORT`** is not double-bound. If the icon is hidden, open the **^** overflow area next to the clock and drag the icon to the visible row. You can pin **`mcp-tray.bat`** or add a shortcut under **`shell:startup`** for login start; for **Task Scheduler**, use **`mcp-tray.bat`** with **Start in** set to the repo folder instead of `start.ps1` if you prefer the tray over a visible console.
+The tray uses **`pythonw.exe`** from **`.venv`** when present so neither uvicorn nor the helper keeps a console. **Right‑click** the notification‑area icon for **Restart MCP**, **Stop MCP**, **Open repo folder**, **Open server log** (`logs/mcp-server.log`), and **Exit**.
+
+If the icon never appears, run **`python mcp_tray.py`** once in PowerShell to see the error.
+
+#### Grok-PC-MCP.exe (taskbar pin)
+
+Windows often **won’t pin `.bat`** files to the taskbar. **`Grok-PC-MCP.exe`** is built **automatically the first time** you start the tray (after `pip install` finishes): PyInstaller runs in the background and drops the **`.exe`** beside **`main.py`**. That step can take **several minutes** and the tray icon appears afterward; if something goes wrong, open **`logs/tray-exe-build.log`**. To **skip** auto-build (e.g. dev machines), set **`GROK_TRAY_NO_AUTO_EXE=1`** in **`.env`** or in Windows environment variables.
+
+**Optional:** run **`.\scripts\build_grok_pc_mcp_exe.ps1`** yourself if you prefer a manual rebuild or a visible PowerShell log. If an older **`.exe`** shows a **pystray / bundled module** error, **delete `Grok-PC-MCP.exe`** and start **`mcp-tray.bat`** again so it rebuilds with the current PyInstaller flags.
+
+That **`.exe`** must stay next to **`main.py`** and **`mcp_tray.py`**. **Pin `Grok-PC-MCP.exe`** (right‑click → Pin to taskbar) or use **`mcp-tray.bat`**, which prefers the **`.exe`** when present. Double‑clicking the **`.exe`** still creates/updates **`.venv`** and installs from **`requirements.txt`** before starting uvicorn.
+
+If the icon is hidden, open the **^** overflow next to the clock and drag the icon to the visible row. For **Task Scheduler**, point the action at **`mcp-tray.bat`** or **`Grok-PC-MCP.exe`** with **Start in** = repo folder.
 
 ### Cursor CLI
 
@@ -201,7 +229,7 @@ Then set Grok’s connector URL to `https://<your-funnel-host>/mcp/` (with trail
 ## Windows Task Scheduler (stability)
 
 - **Trigger:** At log on (the dedicated automation user), or at startup if appropriate.
-- **Action:** `C:\Path\to\grok-browser-mcp-agent\mcp-tray.bat` with **“Start in”** set to the repo directory for a **tray-only** run, or `powershell.exe -ExecutionPolicy Bypass -File C:\Path\to\grok-browser-mcp-agent\start.ps1` if you want a visible console (or invoke `python -m uvicorn ...` after setting env vars).
+- **Action:** `C:\Path\to\grok-browser-mcp-agent\mcp-tray.bat` or **`Grok-PC-MCP.exe`** with **“Start in”** set to the repo directory for a **tray-only** run, or `powershell.exe -ExecutionPolicy Bypass -File C:\Path\to\grok-browser-mcp-agent\start.ps1` if you want a visible console (or invoke `python -m uvicorn ...` after setting env vars).
 - **Settings:** “Restart on failure” with a short delay.
 - After updates, restart the task so **Playwright** / **browser-use** pick up changes.
 

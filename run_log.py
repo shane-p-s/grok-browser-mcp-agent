@@ -187,6 +187,20 @@ def summarize_browser_history(history: Any) -> dict[str, Any]:
                     for act in mo.action:
                         name = type(act).__name__
                         actions.append(name)
+                # Include short model text so server-side headed-retry can see Cloudflare/captcha signals
+                # (these fields are not in final_result until done; action_types alone miss them).
+                if mo is not None:
+                    bits: list[str] = []
+                    for attr in ("evaluation_previous_goal", "memory", "next_goal"):
+                        try:
+                            raw = getattr(mo, attr, None)
+                        except Exception:
+                            raw = None
+                        if isinstance(raw, str) and raw.strip():
+                            bits.append(raw.strip())
+                    if bits:
+                        joined = " | ".join(bits)
+                        step["model_notes"] = joined[:2000]
             except Exception:
                 pass
             if actions:

@@ -1,14 +1,25 @@
 @echo off
-REM System tray for Grok MCP: no foreground console; uvicorn runs in background.
-REM Uses pythonw when available so this script does not keep a console open.
-REM Install tray deps once: pip install pystray pillow  (also in requirements.txt)
-REM Right-click the tray icon -> Restart / Stop / Open folder / Open log / Exit.
+REM One double-click: free PORT, then tray (or Grok-PC-MCP.exe if present).
+REM Keeps this window only until setup finishes; tray has no console.
 cd /d "%~dp0"
-if exist "%~dp0.venv\Scripts\pythonw.exe" (
-  "%~dp0.venv\Scripts\pythonw.exe" "%~dp0mcp_tray.py"
-) else if exist "%~dp0.venv\Scripts\python.exe" (
-  "%~dp0.venv\Scripts\python.exe" "%~dp0mcp_tray.py"
-) else (
-  pythonw "%~dp0mcp_tray.py" 2>nul
-  if errorlevel 1 py -3 "%~dp0mcp_tray.py"
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0stop.ps1"
+
+if exist "%~dp0Grok-PC-MCP.exe" (
+  start "" "%~dp0Grok-PC-MCP.exe"
+  exit /b 0
 )
+
+if exist "%~dp0.venv\Scripts\pythonw.exe" (
+  start "" "%~dp0.venv\Scripts\pythonw.exe" "%~dp0mcp_tray.py"
+  exit /b 0
+)
+
+where pyw >nul 2>&1
+if %ERRORLEVEL% equ 0 (
+  start "" pyw -3 "%~dp0mcp_tray.py"
+  exit /b 0
+)
+
+start "" pythonw "%~dp0mcp_tray.py"
+exit /b 0

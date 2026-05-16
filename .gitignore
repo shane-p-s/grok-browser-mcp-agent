@@ -6,3 +6,8 @@ venv/
 
 # Tray / uvicorn log (mcp_tray.py)
 logs/
+
+# PyInstaller / pinned launcher (build locally)
+build/
+dist/
+Grok-PC-MCP.exe

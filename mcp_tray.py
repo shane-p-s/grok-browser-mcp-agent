@@ -3,13 +3,15 @@ Windows system-tray supervisor for the MCP server: uvicorn runs in the backgroun
 with output to logs/mcp-server.log. Use the tray icon (notification area) for
 Restart / Stop / Open folder / Open log / Exit.
 
-Dependencies: pip install pystray pillow
-Launch: mcp-tray.bat — pin to taskbar or add to shell:startup for login run.
+On first run, creates .venv if needed, pip-installs requirements, and (Windows) builds
+Grok-PC-MCP.exe once for taskbar pin—no manual build script unless you set GROK_TRAY_NO_AUTO_EXE=1.
+Double-click mcp-tray.bat or run Grok-PC-MCP.exe after it appears beside main.py.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -17,12 +19,29 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-ROOT = Path(__file__).resolve().parent
+
+def _repo_root() -> Path:
+    if getattr(sys, "frozen", False) and sys.platform == "win32":
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+ROOT = _repo_root()
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "mcp-server.log"
+SETUP_LOG = LOG_DIR / "tray-exe-build.log"
+REQ_FILE = ROOT / "requirements.txt"
+TASKBAR_EXE = ROOT / "Grok-PC-MCP.exe"
+PYINSTALLER_SPEC = ROOT / "Grok-PC-MCP.spec"
 
 _server_proc: subprocess.Popen | None = None
 _server_log_f: TextIO | None = None
+
+
+def _win_nowindow() -> int:
+    if sys.platform == "win32":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    return 0
 
 
 def _load_env() -> None:
@@ -33,16 +52,202 @@ def _load_env() -> None:
         load_dotenv(env_path, override=False)
 
 
-def _win_nowindow() -> int:
+def _run_stop_script() -> None:
+    stop_ps = ROOT / "stop.ps1"
+    if not stop_ps.is_file():
+        return
+    subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(stop_ps),
+        ],
+        cwd=str(ROOT),
+        creationflags=_win_nowindow(),
+        timeout=120,
+    )
+
+
+def _venv_python() -> Path | None:
+    exe = ROOT / ".venv" / "Scripts" / "python.exe"
+    return exe if exe.is_file() else None
+
+
+def _bootstrap_venv() -> bool:
+    vdir = ROOT / ".venv"
+    py_launcher = shutil.which("py")
+    if py_launcher:
+        r = subprocess.run(
+            [py_launcher, "-3", "-m", "venv", str(vdir)],
+            cwd=str(ROOT),
+            creationflags=_win_nowindow(),
+        )
+        if r.returncode == 0 and _venv_python():
+            return True
+    for name in ("python", "python3"):
+        py = shutil.which(name)
+        if not py:
+            continue
+        r = subprocess.run(
+            [py, "-m", "venv", str(vdir)],
+            cwd=str(ROOT),
+            creationflags=_win_nowindow(),
+        )
+        if r.returncode == 0 and _venv_python():
+            return True
+    return False
+
+
+def _ensure_venv_and_requirements() -> None:
+    if not REQ_FILE.is_file():
+        return
+    vp = _venv_python()
+    if vp is None:
+        if not _bootstrap_venv():
+            msg = (
+                "Could not create .venv. Install Python 3 from python.org "
+                "or the Windows py launcher, then try again."
+            )
+            _fatal_gui(msg)
+            sys.exit(1)
+        vp = _venv_python()
+    assert vp is not None
+    r = subprocess.run(
+        [
+            str(vp),
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "--disable-pip-version-check",
+            "-r",
+            str(REQ_FILE),
+        ],
+        cwd=str(ROOT),
+        creationflags=_win_nowindow(),
+    )
+    if r.returncode != 0:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as lf:
+            lf.write(f"\n--- pip install failed rc={r.returncode} at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        _fatal_gui(
+            f"pip install failed (exit {r.returncode}). Open the repo folder and run:\n"
+            f".venv\\Scripts\\python.exe -m pip install -r requirements.txt"
+        )
+        sys.exit(1)
+
+
+def _maybe_build_taskbar_exe() -> None:
+    """One-time PyInstaller build so Grok-PC-MCP.exe exists for taskbar pin (optional skip via env)."""
+    if sys.platform != "win32" or getattr(sys, "frozen", False):
+        return
+    if TASKBAR_EXE.is_file():
+        return
+    skip = os.getenv("GROK_TRAY_NO_AUTO_EXE", "").strip().lower()
+    if skip in ("1", "true", "yes"):
+        return
+    vp = _venv_python()
+    if vp is None:
+        return
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    def slog(line: str) -> None:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(SETUP_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{stamp} {line}\n")
+
+    script = ROOT / "mcp_tray.py"
+    if not script.is_file():
+        return
+    if not PYINSTALLER_SPEC.is_file():
+        slog("Grok-PC-MCP.spec missing; cannot auto-build .exe.")
+        return
+
+    slog("Starting auto-build of Grok-PC-MCP.exe (typically 1-3 minutes, may be longer).")
+    pip_pi = subprocess.run(
+        [str(vp), "-m", "pip", "install", "-q", "pyinstaller"],
+        cwd=str(ROOT),
+        creationflags=_win_nowindow(),
+    )
+    if pip_pi.returncode != 0:
+        slog(f"pip install pyinstaller failed (exit {pip_pi.returncode}); tray still runs from Python.")
+        return
+
+    work = ROOT / "build" / "pyinstaller"
+    try:
+        if work.is_dir():
+            shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        slog(f"Could not prepare build folder: {e}")
+        return
+
+    try:
+        r = subprocess.run(
+            [
+                str(vp),
+                "-m",
+                "PyInstaller",
+                "--distpath",
+                str(ROOT),
+                "--workpath",
+                str(work),
+                "--clean",
+                "--noconfirm",
+                str(PYINSTALLER_SPEC),
+            ],
+            cwd=str(ROOT),
+            creationflags=_win_nowindow(),
+            timeout=1200,
+        )
+    except subprocess.TimeoutExpired:
+        slog("PyInstaller timed out after 20 minutes; you can run scripts/build_grok_pc_mcp_exe.ps1 manually.")
+        return
+    if r.returncode != 0:
+        slog(f"PyInstaller failed (exit {r.returncode}); see PowerShell build script or fix errors above. Tray still runs.")
+        return
+    if TASKBAR_EXE.is_file():
+        slog("Grok-PC-MCP.exe is ready; next launch can use the .exe for taskbar pin.")
+    else:
+        slog("PyInstaller reported success but Grok-PC-MCP.exe is missing.")
+
+
+def _fatal_gui(msg: str) -> None:
+    print(msg, file=sys.stderr)
     if sys.platform == "win32":
-        return getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-    return 0
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, msg, "Grok MCP", 0x10)
+        except Exception:
+            pass
+
+
+def _win_single_instance() -> bool:
+    """Return True if we should continue; False if another tray instance is running."""
+    if sys.platform != "win32":
+        return True
+    import ctypes
+
+    ERROR_ALREADY_EXISTS = 183
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.SetLastError(0)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CreateMutexW(None, True, "Local\\GrokBrowserMcpTray_1")
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        return False
+    return True
 
 
 def _python_exe() -> str:
-    venv_py = ROOT / ".venv" / "Scripts" / "python.exe"
-    if venv_py.is_file():
-        return str(venv_py)
+    v = _venv_python()
+    if v is not None:
+        return str(v)
     return sys.executable
 
 
@@ -69,21 +274,7 @@ def stop_mcp() -> None:
             lf.close()
         except OSError:
             pass
-    stop_ps = ROOT / "stop.ps1"
-    if stop_ps.is_file():
-        subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(stop_ps),
-            ],
-            cwd=str(ROOT),
-            creationflags=_win_nowindow(),
-            timeout=120,
-        )
+    _run_stop_script()
 
 
 def start_mcp() -> tuple[bool, str]:
@@ -147,24 +338,42 @@ def _tray_icon_image():
 
 
 def main() -> None:
+    if sys.platform == "win32" and not _win_single_instance():
+        sys.exit(0)
+
+    _ensure_venv_and_requirements()
+    _load_env()
+    _maybe_build_taskbar_exe()
+    _run_stop_script()
+
     try:
         import pystray
         from pystray import Menu, MenuItem
-    except ImportError:
-        msg = "Missing dependencies. Run: pip install pystray pillow"
-        print(msg, file=sys.stderr)
-        if sys.platform == "win32":
-            try:
-                import ctypes
+    except ImportError as e:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            import traceback
 
-                ctypes.windll.user32.MessageBoxW(0, msg, "Grok MCP tray", 0x10)
-            except Exception:
-                pass
+            with open(LOG_DIR / "tray-import-error.log", "w", encoding="utf-8") as ef:
+                traceback.print_exc(file=ef)
+        except OSError:
+            pass
+        if getattr(sys, "frozen", False):
+            msg = (
+                "Grok-PC-MCP.exe is missing bundled tray modules (PyInstaller).\n\n"
+                f"Detail: {e}\n\n"
+                "Delete Grok-PC-MCP.exe in this folder, then double-click "
+                "mcp-tray.bat to rebuild the .exe. Or run "
+                ".\\scripts\\build_grok_pc_mcp_exe.ps1"
+            )
         else:
-            input("Press Enter to close...")
+            msg = (
+                f"pystray failed to import: {e}\n\n"
+                "Try: .venv\\Scripts\\python.exe -m pip install -r requirements.txt"
+            )
+        _fatal_gui(msg)
         sys.exit(1)
 
-    _load_env()
     icon_holder: dict[str, object] = {"icon": None}
 
     def notify(title: str, message: str) -> None:
