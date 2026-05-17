@@ -43,15 +43,36 @@ async def open_tab(
     headed: bool,
     user_data_dir: str | None,
     url: str | None = None,
+    reuse_existing_tab: bool = True,
 ) -> dict[str, Any]:
+    text_label = (label or "grok_tab").strip()[:200] or "grok_tab"
+    if reuse_existing_tab and browser_hub.normalize_tab_label(text_label):
+        existing = browser_hub.find_idle_tab_by_label(text_label)
+        if existing:
+            browser_hub.touch_idle_tab_reuse(existing.tab_id)
+            out: dict[str, Any] = {
+                "success": True,
+                "tab_id": existing.tab_id,
+                "status": "idle",
+                "tab_label": existing.label,
+                "tab_reused": True,
+            }
+            if url and url.strip():
+                nav = await navigate(existing.tab_id, url.strip())
+                if nav.get("error"):
+                    out["navigate_error"] = nav
+                else:
+                    out.update({k: v for k, v in nav.items() if k != "tab_id"})
+            return out
+
     tab_id, err = await browser_hub.open_granular_tab(
-        label or "grok_tab",
+        text_label,
         headed=headed,
         user_data_dir=user_data_dir,
     )
     if err:
         return {"error": err}
-    out: dict[str, Any] = {"success": True, "tab_id": tab_id, "status": "idle"}
+    out = {"success": True, "tab_id": tab_id, "status": "idle", "tab_label": text_label, "tab_reused": False}
     if url and url.strip():
         nav = await navigate(tab_id, url.strip())
         if nav.get("error"):

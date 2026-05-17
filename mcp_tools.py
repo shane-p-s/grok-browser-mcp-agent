@@ -18,12 +18,14 @@ from mcp.server.fastmcp import FastMCP
 
 import browser_granular
 import browser_hub
+import browser_watch
 import browser_prefill
 import memory_store
 import secrets_store
 import secrets_submit
 import tool_gating
 from cursor_agent_tools import register_cursor_tools
+from omi_tools import index_ready, omi_api_key_configured, register_omi_tools
 from oauth_routes import mcp_auth_configured, oauth_auth_configured
 from github_tools import (
     github_get_diff as github_compare_api,
@@ -139,9 +141,23 @@ def _grok_connector_hints() -> dict[str, Any]:
         "for login and vision: each call returns in seconds. Use return_screenshot=true for screenshot_url after each step."
     )
     hints.append(
+        "Watch Mode: browser_watch_start(tab_id) then poll browser_watch_status or fetch_url(latest_frame_url) every ~2s for near-real-time vision; browser_watch_stop when done. "
+        "browser_open_tab reuses an idle tab when tab_label matches (tab_reused=true); pass reuse_existing_tab=false for a fresh tab."
+    )
+    hints.append(
         "browser_task holds the MCP connection for the whole agent run (minutes). Grok transport errors on browser_task often mean the client timed out while Chrome is still working. "
         "Use continue_tab_id on an existing tab for fuzzy multi-step work only. Each new browser_task without continue_tab_id opens another tab (browser-use titles them 'Starting agent …')."
     )
+    if omi_api_key_configured():
+        hints.append(
+            "Omi wearable: when the user mentions past conversations, people, what they said, preferences, their week, or prep for a call, "
+            "proactively call omi_recall once (plain-language query) — do not wait for 'use Omi'. For remember/don't forget, call omi_remember. "
+            "In live voice prefer one omi_recall per turn; progressive transcript depth is automatic."
+        )
+    else:
+        hints.append(
+            "Omi: set request_user_secret(name='omi_api_key') once, then use omi_recall / omi_remember for personal history in voice or chat."
+        )
     return {
         "grok_connector_hints": hints,
         "screenshot_delivery": "screenshot_url_only",
@@ -479,6 +495,7 @@ async def _browser_run_once(
 
 def register_tools(mcp: FastMCP) -> None:
     register_cursor_tools(mcp)
+    register_omi_tools(mcp)
 
     @mcp.tool()
     async def get_status() -> dict[str, Any]:
@@ -512,7 +529,16 @@ def register_tools(mcp: FastMCP) -> None:
             "browser_click",
             "browser_type",
             "browser_press_keys",
+            "browser_watch_start",
+            "browser_watch_status",
+            "browser_watch_stop",
             "browser_capture_tab_screenshot",
+            "omi_ping",
+            "omi_recall",
+            "omi_remember",
+            "omi_sync_index",
+            "omi_list_conversations",
+            "omi_get_conversation",
         ]
         mem = memory_store.memory_summary_for_status()
         log_dir = os.getenv("AGENT_LOG_DIR") or ""
@@ -532,6 +558,8 @@ def register_tools(mcp: FastMCP) -> None:
             "deepseek_configured": bool((os.getenv("DEEPSEEK_API_KEY") or "").strip()),
             "cursor_api_configured": bool((os.getenv("CURSOR_API_KEY") or "").strip()),
             "github_token_configured": bool((os.getenv("GITHUB_TOKEN") or "").strip()),
+            "omi_api_key_configured": omi_api_key_configured(),
+            "omi_index_ready": index_ready() if omi_api_key_configured() else False,
             "secrets_configured": secrets_store.master_key_configured(),
             "memory_file": str(memory_store.memory_file_path()),
             "memory_summary": mem,
@@ -768,10 +796,12 @@ def register_tools(mcp: FastMCP) -> None:
         url: str = "",
         headed: bool | None = None,
         return_screenshot: bool = False,
+        reuse_existing_tab: bool = True,
     ) -> dict[str, Any]:
         """
         Open a new tab in shared Chrome for granular control (no Browser Use agent, no 'Starting agent' tab).
-        Returns tab_id (status idle). Optional url navigates immediately. Prefer this over browser_task for login flows.
+        When reuse_existing_tab=true (default) and an idle tab has the same tab_label, returns that tab_id (tab_reused=true).
+        Optional url navigates immediately. Prefer this over browser_task for login flows.
         """
         if (g := tool_gating.tool_disabled_error("browser_open_tab")) is not None:
             return g
@@ -782,6 +812,7 @@ def register_tools(mcp: FastMCP) -> None:
             headed=headed_eff,
             user_data_dir=user_data,
             url=url or None,
+            reuse_existing_tab=reuse_existing_tab,
         )
         if out.get("tab_id"):
             return await _merge_tab_screenshot(out["tab_id"], return_screenshot, out)
@@ -866,6 +897,34 @@ def register_tools(mcp: FastMCP) -> None:
             return g
         out = await browser_granular.press_keys(tab_id, keys)
         return await _merge_tab_screenshot(tab_id, return_screenshot, out)
+
+    @mcp.tool()
+    async def browser_watch_start(
+        tab_id: str,
+        duration_seconds: float | None = None,
+        interval_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        Start background viewport captures for a tab (non-blocking). Returns watch_id and latest_frame_url.
+        Poll with browser_watch_status or fetch_url(latest_frame_url); call browser_watch_stop when finished.
+        """
+        if (g := tool_gating.tool_disabled_error("browser_watch_start")) is not None:
+            return g
+        return await browser_watch.start_watch(tab_id, duration_seconds, interval_seconds)
+
+    @mcp.tool()
+    async def browser_watch_status(watch_id: str) -> dict[str, Any]:
+        """Poll Watch Mode: active flag, frame_count, latest_frame_url (append ?t=frame_count when fetching)."""
+        if (g := tool_gating.tool_disabled_error("browser_watch_status")) is not None:
+            return g
+        return browser_watch.get_watch_status(watch_id)
+
+    @mcp.tool()
+    async def browser_watch_stop(watch_id: str) -> dict[str, Any]:
+        """Stop Watch Mode and return recent_screenshot_urls from the capture window."""
+        if (g := tool_gating.tool_disabled_error("browser_watch_stop")) is not None:
+            return g
+        return await browser_watch.stop_watch(watch_id)
 
     @mcp.tool()
     async def browser_capture_tab_screenshot(tab_id: str = "") -> dict[str, Any]:
@@ -1040,6 +1099,19 @@ def register_tools(mcp: FastMCP) -> None:
 
         task_for_agent = _effective_browser_task(task, return_screenshot)
         cont = (continue_tab_id or "").strip() or None
+        label_for_match = (tab_label or "").strip()
+        if not cont and label_for_match:
+            auto_label = os.getenv("BROWSER_AUTO_CONTINUE_TAB_BY_LABEL", "false").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            if auto_label:
+                existing = browser_hub.find_idle_tab_by_label(label_for_match)
+                if existing:
+                    cont = existing.tab_id
+                    run_meta["continue_tab_id_auto_from_label"] = cont
         if cont:
             task_for_agent = (
                 f"{task_for_agent}\n\n[MCP: Continuing on existing browser tab {cont}; "

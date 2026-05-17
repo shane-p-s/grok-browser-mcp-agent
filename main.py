@@ -99,10 +99,17 @@ def build_mcp() -> FastMCP:
         instructions=(
             "Remote tools: ping, fetch_url, github_get_file (ref=branch/tag/SHA + content_text), github_list_repo_files, "
             "github_get_diff, github_create_issue, request_user_secret (127.0.0.1 form on PC), list_secrets, revoke_secret, "
-            "browser_open_tab, browser_navigate, browser_get_page_state, browser_click, browser_type, browser_press_keys (fast CDP, no agent), "
-            "browser_task (shared Chrome; continue_tab_id), browser_capture_tab_screenshot, list_browser_tabs, close_browser_tab, "
+            "browser_open_tab, browser_navigate, browser_get_page_state, browser_click, browser_type, browser_press_keys, "
+            "browser_watch_start/status/stop (near-real-time frames), browser_task (shared Chrome; continue_tab_id), "
+            "browser_capture_tab_screenshot, list_browser_tabs, close_browser_tab, "
             "cursor_agent (levels 1/2/3; approve_cursor_writes with optional always_allow_level_3_rule), revoke_cursor_writes, "
+            "omi_recall, omi_remember, omi_ping, omi_sync_index, "
             "get_status, get_run_log, list_recent_runs. "
+            "Omi wearable (when omi_api_key configured per get_status): proactively call omi_recall when the user refers to past "
+            "conversations, people by name, what they said or did, preferences, their week or day, meeting prep, or verifying memory — "
+            "without waiting for 'use Omi'. Pass their intent as query in plain language; use one omi_recall per voice turn. "
+            "Transcript excerpts and deeper depth are automatic when precision matters. For remember/don't forget, call omi_remember. "
+            "Omi is usually accurate; for exact quotes or commitments, use excerpt-backed wording. If the user disputes, omi_recall again with depth=full. "
             "Streamable HTTP: FastMCP wraps official mcp MCPServer + StreamableHTTPSessionManager (same transport as streamable_http_app). "
             "browser_task/cursor_agent return run_id."
         ),
@@ -164,7 +171,34 @@ async def root(_):
             "mcp": "/mcp/",
             "oauth_metadata": "/.well-known/oauth-authorization-server",
             "browser_screenshot": "/browser-screenshot/{token} (GET; one-time PNG when PUBLIC_MCP_BASE_URL is set; optional BROWSER_SCREENSHOT_REQUIRE_BEARER)",
+            "browser_watch": "/browser-watch/{watch_id}/latest (GET; reusable latest PNG while watch active; optional BROWSER_SCREENSHOT_REQUIRE_BEARER)",
         }
+    )
+
+
+async def browser_watch_latest(request):
+    """Serve the latest Watch Mode frame (overwritten PNG; not consumed on GET)."""
+    import browser_watch as bw
+
+    if (os.getenv("BROWSER_SCREENSHOT_REQUIRE_BEARER") or "").strip().lower() in ("1", "true", "yes", "on"):
+        from auth_middleware import verify_mcp_bearer_from_request
+
+        bad = verify_mcp_bearer_from_request(request)
+        if bad is not None:
+            return bad
+
+    watch_id = (request.path_params.get("watch_id") or "").strip()
+    path = bw.get_latest_path_for_http(watch_id)
+    if path is None:
+        return JSONResponse({"error": "not_found_or_no_frame_yet"}, status_code=404)
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return JSONResponse({"error": "read_failed"}, status_code=500)
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store, no-cache"},
     )
 
 
@@ -215,6 +249,9 @@ async def lifespan(app: Starlette):
 
     hb = asyncio.create_task(_heartbeat())
     try:
+        from omi_tools import schedule_background_omi_sync
+
+        schedule_background_omi_sync()
         async with _mcp_asgi.router.lifespan_context(_mcp_asgi):
             yield
     finally:
@@ -226,6 +263,7 @@ async def lifespan(app: Starlette):
 routes = [
     Route("/", root, methods=["GET"]),
     Route("/browser-screenshot/{token}", browser_screenshot, methods=["GET"]),
+    Route("/browser-watch/{watch_id}/latest", browser_watch_latest, methods=["GET"]),
     Route("/health", health, methods=["GET"]),
     Route("/health/live", health_live, methods=["GET"]),
     Route("/.well-known/oauth-authorization-server", oauth_metadata, methods=["GET"]),

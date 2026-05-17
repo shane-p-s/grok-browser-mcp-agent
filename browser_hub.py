@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -56,6 +57,36 @@ def run_slot() -> asyncio.Semaphore:
     return _semaphore()
 
 
+def normalize_tab_label(label: str) -> str:
+    """Strip, collapse whitespace, lowercase, max 200 chars — for tab_label reuse matching."""
+    s = re.sub(r"\s+", " ", (label or "").strip())
+    return s[:200].lower() if s else ""
+
+
+def find_idle_tab_by_label(label: str) -> TabRecord | None:
+    """Return the most recently updated idle tab with the same normalized label."""
+    key = normalize_tab_label(label)
+    if not key:
+        return None
+    best: TabRecord | None = None
+    for rec in _tabs.values():
+        if rec.status != "idle":
+            continue
+        if normalize_tab_label(rec.label) == key:
+            if best is None or rec.updated_at > best.updated_at:
+                best = rec
+    return best
+
+
+def touch_idle_tab_reuse(tab_id: str) -> None:
+    """Mark tab as recently reused (stays idle)."""
+    tid = (tab_id or "").strip()
+    rec = _tabs.get(tid)
+    if rec and rec.status != "closed":
+        rec.status = "idle"
+        rec.updated_at = time.time()
+
+
 def _cdp_json_version_http_url(cdp_ws: str) -> str | None:
     """Map ws://host:port/... to http://host:port/json/version for a cheap liveness probe."""
     try:
@@ -86,6 +117,12 @@ async def force_reset_browser_hub(reason: str = "manual_or_recovery") -> None:
     """Clear cached CDP URL and tab registry (e.g. after user closed Chromium). Next browser_task launches fresh."""
     global _cdp_url, _headed_launched, _user_data_dir
     logger.warning("browser hub force reset: %s", reason)
+    try:
+        import browser_watch
+
+        await browser_watch.cancel_all_watches()
+    except Exception as e:
+        logger.debug("cancel watches on hub reset: %s", e)
     async with _launch_lock:
         _cdp_url = None
         _headed_launched = None
@@ -442,6 +479,12 @@ async def close_tab(tab_id: str) -> dict[str, Any]:
     tid = (tab_id or "").strip()
     if not tid:
         return {"error": "tab_id is required"}
+    try:
+        import browser_watch
+
+        await browser_watch.cancel_watch_for_tab(tid)
+    except Exception as e:
+        logger.debug("cancel watch on close_tab %s: %s", tid, e)
     async with _hub_lock:
         rec = _tabs.get(tid)
         if not rec:

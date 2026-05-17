@@ -43,7 +43,10 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 | `list_browser_tabs` | Open automation tabs: **`tab_id`**, **`label`**, **`status`**, **`url`**, **`title`** |
 | `close_browser_tab` | Close a tab by **`tab_id`** |
 | `reset_browser_hub` | Clear stale shared-Chromium state if you **closed the browser window** or attach fails; next **`browser_task`** launches fresh Chromium (**old `tab_id` values invalid**) |
-| `browser_open_tab` | New tab for **granular** control (no “Starting agent …” tab); optional **`url`**; **`headed`** |
+| `browser_open_tab` | Granular tab (no “Starting agent …” tab); **`reuse_existing_tab=true`** (default) reuses an **idle** tab with the same **`tab_label`** (`tab_reused`); optional **`url`**, **`headed`** |
+| `browser_watch_start` | Non-blocking background captures (~2s); returns **`watch_id`**, **`latest_frame_url`** |
+| `browser_watch_status` | Poll **`frame_count`**, **`latest_frame_url`**, **`active`** |
+| `browser_watch_stop` | Cancel watch; optional **`recent_screenshot_urls`** |
 | `browser_navigate` | **`tab_id` + url`** — direct navigation (seconds) |
 | `browser_get_page_state` | Interactive elements with **`index`** for click/type (bounded list) |
 | `browser_click` | By **`element_index`**, **`css_selector`**, or **`x`/`y`** |
@@ -55,6 +58,37 @@ This repo uses **`mcp.server.fastmcp.FastMCP`** from the **official [`mcp`](http
 | `revoke_cursor_writes` | Remove Level 3 permission **and** any always-allow rule for a workspace |
 | `get_run_log` | Redacted, bounded event log for a **`run_id`** (debugging; no model chain-of-thought) |
 | `list_recent_runs` | Newest **`run_id`** entries from instrumented tools |
+| `omi_recall` | **Primary Omi read** — pass the user's intent in plain language; summaries, memories, open tasks; auto transcript excerpts when precision matters (voice-friendly) |
+| `omi_remember` | Store a durable fact when the user says remember / don't forget (`omi_api_key` secret) |
+| `omi_ping` | Omi API + local index health |
+| `omi_sync_index` | Refresh local semantic index (also runs in background on server start) |
+| `omi_list_conversations` | Advanced: list conversations (prefer **`omi_recall`**) |
+| `omi_get_conversation` | Advanced: one conversation by id |
+
+### Omi wearable (voice and everyday chat)
+
+Connect your [Omi](https://docs.omi.me/doc/developer/api/overview) Developer API key so Grok can use captured conversations and memories **without you naming tools**.
+
+**Setup once**
+
+1. Set **`SECRETS_MASTER_KEY`** in `.env` and restart MCP.
+2. Call **`request_user_secret(name="omi_api_key")`** — paste the key from Omi app → Settings → Developer.
+3. Call **`omi_ping`** or **`get_status`** → **`omi_api_key_configured`** / **`omi_index_ready`**.
+
+The server **warms a local index in the background** (`omi_sync_index`) so **`omi_recall`** stays fast in live voice.
+
+**How you talk (examples)** — Grok should call **`omi_recall`** or **`omi_remember`** on its own:
+
+| You say | Grok uses |
+|---------|-----------|
+| “What’s been going on with me lately?” | `omi_recall(query="recent life context", days=7)` |
+| “What did I tell John about the project?” | `omi_recall(query="John project")` — excerpts auto if needed |
+| “Remember I prefer window seats” | `omi_remember(content="…")` |
+| “Help me prep for my call with Sarah” | `omi_recall(query="Sarah", days=60)` |
+
+Omi is **usually accurate**; transcripts can occasionally mishear or mix up speakers. Grok is instructed to verify exact quotes from transcript excerpts, not to read disclaimers aloud unless you push back.
+
+**Grok `allowed_tools`:** include at minimum `omi_recall`, `omi_remember`, `omi_ping`, `omi_sync_index` (or copy full **`grok_allowed_tools_csv`** from **`get_status`**).
 
 ### Operator memory
 
@@ -81,11 +115,14 @@ Use these instead of one long **`browser_task`** when Grok reports **transport**
 
 **Typical login flow:**
 
-1. **`browser_open_tab(tab_label="golf login", headed=true, url="https://…/login")`** → **`tab_id`**, optional **`screenshot_url`**
-2. **`browser_get_page_state(tab_id)`** → element **`index`** values
-3. **`browser_type(tab_id, secret_name="golf_password", element_index=…)`** (never put passwords in tool args as plain text)
-4. **`browser_click(tab_id, element_index=…)`** or **`browser_press_keys(tab_id, keys="Enter")`**
-5. Repeat **`browser_get_page_state`** + **`browser_capture_tab_screenshot`** after each step for vision
+1. **`browser_open_tab(tab_label="golf login", headed=true, url="https://…/login")`** → **`tab_id`** (same label + idle tab → **`tab_reused: true`**), optional **`screenshot_url`**
+2. **`browser_watch_start(tab_id, duration_seconds=20, interval_seconds=2)`** → **`latest_frame_url`**; poll with **`browser_watch_status`** or **`fetch_url`** every ~2s for near-real-time vision (operator sees live headed Chrome; Grok sees polled stills)
+3. **`browser_get_page_state(tab_id)`** → element **`index`** values
+4. **`browser_type(tab_id, secret_name="golf_password", element_index=…)`** (never put passwords in tool args as plain text)
+5. **`browser_click(tab_id, element_index=…)`** or **`browser_press_keys(tab_id, keys="Enter")`** with **`return_screenshot=true`** for action-specific frames
+6. **`browser_watch_stop(watch_id)`** when done
+
+Pass **`reuse_existing_tab=false`** on **`browser_open_tab`** when you need a fresh tab despite the same label. **`browser_task`** can auto-attach by label only when **`BROWSER_AUTO_CONTINUE_TAB_BY_LABEL=true`** (default **false**).
 
 **`browser_task`** remains for fuzzy multi-step automation (captcha, exploration) when you accept longer runs and possible timeouts. **`browser_open_tab`** does **not** create browser-use “Starting agent …” tabs.
 
@@ -96,7 +133,7 @@ Use these instead of one long **`browser_task`** when Grok reports **transport**
 **If your client only calls a subset or flakes on some tools:** paste the full comma-separated list (same order as `get_status` → **`tools`**, or copy **`grok_allowed_tools_csv`** from a `get_status` response after MCP restart):
 
 ```text
-ping,fetch_url,github_get_file,github_list_repo_files,github_get_diff,github_create_issue,request_user_secret,list_secrets,revoke_secret,browser_task,cursor_agent,approve_cursor_writes,revoke_cursor_writes,get_run_log,list_recent_runs,get_status,list_browser_tabs,close_browser_tab,reset_browser_hub,browser_open_tab,browser_navigate,browser_get_page_state,browser_click,browser_type,browser_press_keys,browser_capture_tab_screenshot
+ping,fetch_url,github_get_file,github_list_repo_files,github_get_diff,github_create_issue,request_user_secret,list_secrets,revoke_secret,browser_task,cursor_agent,approve_cursor_writes,revoke_cursor_writes,get_run_log,list_recent_runs,get_status,list_browser_tabs,close_browser_tab,reset_browser_hub,browser_open_tab,browser_navigate,browser_get_page_state,browser_click,browser_type,browser_press_keys,browser_watch_start,browser_watch_status,browser_watch_stop,browser_capture_tab_screenshot,omi_ping,omi_recall,omi_remember,omi_sync_index,omi_list_conversations,omi_get_conversation
 ```
 
 Start with `ping`, `get_status`, then expand as needed. For **`cursor_agent`**, default **`capability_level=2`** (plan / propose). **Level 3** requires **`approve_cursor_writes`** (or **`always_allow_level_3_rule`**) for that workspace on the PC.

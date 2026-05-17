@@ -107,18 +107,29 @@ Exact names (for `allowed_tools` in Grok):
 | `list_browser_tabs` | Open tabs from **`browser_task`**: **`tab_id`**, **`label`**, **`run_id`**, **`status`** (`running` / `idle`), **`url`**, **`title`** |
 | `close_browser_tab` | Close a tab by **`tab_id`** from **`list_browser_tabs`** or a prior **`browser_task`** result |
 | `reset_browser_hub` | Clear shared Chromium CDP cache + tab registry (e.g. operator closed the browser); next **`browser_task`** starts fresh (**invalidates old `tab_id`**) |
-| `browser_open_tab` | Granular tab (no “Starting agent …”); optional **`url`**, **`headed`** |
+| `browser_open_tab` | Granular tab (no “Starting agent …”); same **`tab_label`** reuses an **idle** tab by default (`tab_reused`); **`reuse_existing_tab=false`** for a new tab; optional **`url`**, **`headed`** |
 | `browser_navigate` | **`tab_id` + https url** (fast) |
 | `browser_get_page_state` | Bounded element list with **`index`** for click/type |
 | `browser_click` | **`element_index`**, **`css_selector`**, or **`x`/`y`** |
 | `browser_type` | Text or **`secret_name`** into a field |
 | `browser_press_keys` | Keyboard (e.g. Enter) |
-| `browser_capture_tab_screenshot` | Fast CDP PNG → **`screenshot_url`** |
+| `browser_watch_start` | Background captures; **`latest_frame_url`** (`GET /browser-watch/{watch_id}/latest`, reusable PNG) |
+| `browser_watch_status` | Poll **`frame_count`**, **`active`**, **`latest_frame_url`** |
+| `browser_watch_stop` | Cancel watch; optional **`recent_screenshot_urls`** |
+| `browser_capture_tab_screenshot` | Fast CDP PNG → **`screenshot_url`** (one-time token URL) |
 | `cursor_agent` | Cursor `agent` CLI; levels **1=ask**, **2=plan (default)**, **3=agent+force** after **`approve_cursor_writes`** or durable rule; returns **`run_id`** |
 | `approve_cursor_writes` | Persist Level-3 permission; optional **`always_allow_level_3_rule`** for durable rule |
 | `revoke_cursor_writes` | Clear Level-3 permission **and** always-allow rule for one workspace path |
 | `get_run_log` | Redacted log for **`run_id`** |
 | `list_recent_runs` | Recent **`run_id`** list |
+| `omi_recall` | **Primary Omi read** — plain-language **`query`**; summaries + memories + tasks; auto transcript excerpts in voice |
+| `omi_remember` | Store durable fact (“remember …”) into Omi |
+| `omi_ping` | Omi connectivity + **`omi_index_ready`** |
+| `omi_sync_index` | Refresh local recall index (background on server start) |
+| `omi_list_conversations` | Advanced list (prefer **`omi_recall`**) |
+| `omi_get_conversation` | Advanced fetch by id |
+
+**Omi / voice:** When **`omi_api_key_configured`** (via **`request_user_secret`**, name **`omi_api_key`**), Grok should **proactively** call **`omi_recall`** when the user mentions past conversations, people, what they said, preferences, their week, or meeting prep — **without** the user saying “use Omi”. One **`omi_recall`** per voice turn. **`omi_remember`** for “remember / don’t forget”. Copy **`grok_allowed_tools_csv`** from **`get_status`** after restart if the connector uses an allowlist.
 
 **Operator memory file:** JSON at **`AGENT_MEMORY_PATH`** (default `%LOCALAPPDATA%\grok-mcp-agent\memory.json`) stores Cursor write approvals, optional **always-allow Level 3** rules, per-domain headed / headless-ok prefs, and bounded recovery hints.
 
@@ -128,14 +139,15 @@ Exact names (for `allowed_tools` in Grok):
 
 ### Granular browser (preferred over long `browser_task`)
 
-1. **`browser_open_tab`** (`headed=true` for login) → **`tab_id`**
-2. **`browser_navigate(tab_id, url)`** with **`return_screenshot=true`**
-3. **`browser_get_page_state(tab_id)`** → use **`index`** in **`browser_click`** / **`browser_type`**
-4. Credentials: **`request_user_secret`** on PC, then **`browser_type(..., secret_name="…")`** — never raw passwords in tool JSON
-5. **`browser_press_keys(tab_id, keys="Enter")`** to submit
-6. Vision after each step: **`return_screenshot=true`** on actions or **`browser_capture_tab_screenshot`**
+1. **`browser_open_tab`** (`headed=true` for login, **`tab_label`** e.g. `"golf login"`) → **`tab_id`** (repeat call with same label → **`tab_reused: true`** if tab still idle)
+2. **`browser_watch_start(tab_id, duration_seconds=20, interval_seconds=2)`** → poll **`browser_watch_status`** or **`fetch_url(latest_frame_url)`** every ~2s for vision; **`browser_watch_stop`** when done
+3. **`browser_navigate(tab_id, url)`** with **`return_screenshot=true`**
+4. **`browser_get_page_state(tab_id)`** → use **`index`** in **`browser_click`** / **`browser_type`**
+5. Credentials: **`request_user_secret`** on PC, then **`browser_type(..., secret_name="…")`** — never raw passwords in tool JSON
+6. **`browser_press_keys(tab_id, keys="Enter")`** to submit
+7. Action-specific vision: **`return_screenshot=true`** on click/type; watch URL for continuous context
 
-Avoid starting a new **`browser_task`** for every step (transport timeouts + extra “Starting agent …” tabs). Use **`browser_task`** only for captcha / exploratory automation.
+Avoid starting a new **`browser_task`** for every step (transport timeouts + extra “Starting agent …” tabs). Use **`browser_task`** only for captcha / exploratory automation. **`browser_task`** label auto-continue: **`BROWSER_AUTO_CONTINUE_TAB_BY_LABEL=true`** (default **false**).
 
 ### `browser_task`: screenshots (what Grok should pass and expect)
 
