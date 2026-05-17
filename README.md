@@ -111,18 +111,24 @@ If Grok’s MCP client **drops long `browser_task` calls** but **`get_status` st
 
 ### Granular browser control (preferred for Grok + vision)
 
-Use these instead of one long **`browser_task`** when Grok reports **transport** errors or you need step-by-step login. Each call finishes in **seconds** and can return **`screenshot_url`** when **`return_screenshot=true`** (default on navigate/click/type).
+Use these instead of one long **`browser_task`** when Grok reports **transport** errors. After a connector reset, call **`get_status`** and read **`grok_browser_playbook`** + **`grok_connector_hints`**.
 
-**Typical login flow:**
+**Defaults (transport-safe):** **`browser_click`**, **`browser_type`**, **`browser_navigate`**, and **`browser_press_keys`** default to **`return_screenshot=false`**. Use **`browser_watch_start`** or **`browser_capture_tab_screenshot`** for vision — not a screenshot after every click.
 
-1. **`browser_open_tab(tab_label="golf login", headed=true, url="https://…/login")`** → **`tab_id`** (same label + idle tab → **`tab_reused: true`**), optional **`screenshot_url`**
-2. **`browser_watch_start(tab_id, duration_seconds=20, interval_seconds=2)`** → **`latest_frame_url`**; poll with **`browser_watch_status`** or **`fetch_url`** every ~2s for near-real-time vision (operator sees live headed Chrome; Grok sees polled stills)
-3. **`browser_get_page_state(tab_id)`** → element **`index`** values
-4. **`browser_type(tab_id, secret_name="golf_password", element_index=…)`** (never put passwords in tool args as plain text)
-5. **`browser_click(tab_id, element_index=…)`** or **`browser_press_keys(tab_id, keys="Enter")`** with **`return_screenshot=true`** for action-specific frames
-6. **`browser_watch_stop(watch_id)`** when done
+**SPA / Kalshi-style browsing:**
 
-Pass **`reuse_existing_tab=false`** on **`browser_open_tab`** when you need a fresh tab despite the same label. **`browser_task`** can auto-attach by label only when **`BROWSER_AUTO_CONTINUE_TAB_BY_LABEL=true`** (default **false**).
+1. **`browser_open_tab(tab_label="kalshi", headed=true, url="https://…")`**
+2. **`browser_watch_start(tab_id, duration_seconds=30, interval_seconds=2)`**
+3. Poll **`browser_watch_status`** or **`fetch_url(latest_frame_url)`**
+4. **`browser_click(tab_id, x=…, y=…, return_screenshot=false)`** using coordinates from the image
+5. Optional: **`browser_get_page_state(tab_id, include_visible_text=true, light=true)`** → **`visible_regions`** with **`center_x`/`center_y`**
+6. **`browser_watch_stop(watch_id)`**
+
+**Login flow:** same watch loop; use **`browser_type(..., secret_name=…)`** with **`visible_regions`** or indices when text is present.
+
+**Tab recovery:** if **`stale: true`** on **`list_browser_tabs`** or **`tab_stale_hub_disconnected`**, call **`reset_browser_hub`** then **`browser_open_tab(reuse_existing_tab=false)`**. CDP loss no longer wipes tab metadata from the server registry.
+
+Pass **`reuse_existing_tab=false`** when you need a fresh tab despite the same label.
 
 **`browser_task`** remains for fuzzy multi-step automation (captcha, exploration) when you accept longer runs and possible timeouts. **`browser_open_tab`** does **not** create browser-use “Starting agent …” tabs.
 
@@ -140,8 +146,8 @@ Start with `ping`, `get_status`, then expand as needed. For **`cursor_agent`**, 
 
 ### Grok: login page screenshot + operator secrets (read this)
 
-1. Call **`get_status`** first and read **`grok_connector_hints`** — it tells you if **`SECRETS_MASTER_KEY`**, **`PUBLIC_MCP_BASE_URL`**, or screenshot Bearer lockdown are relevant.
-2. **Screenshot / vision:** Prefer **`browser_open_tab`** → **`browser_navigate`** / **`browser_click`** / **`browser_type`** with **`return_screenshot=true`**, or **`browser_capture_tab_screenshot`**. Without **`PUBLIC_MCP_BASE_URL`**, you will not get **`screenshot_url`**. The connector must **HTTPS GET** that URL for the PNG; when **`BROWSER_SCREENSHOT_REQUIRE_BEARER=true`**, include the same **`Authorization: Bearer …`** as for MCP.
+1. Call **`get_status`** first and read **`grok_browser_playbook`** and **`grok_connector_hints`**.
+2. **Screenshot / vision:** Prefer **Watch Mode** or **`browser_capture_tab_screenshot`**; avoid **`return_screenshot=true`** on every click (transport timeouts). Without **`PUBLIC_MCP_BASE_URL`**, you will not get **`screenshot_url`**. The connector must **HTTPS GET** that URL for the PNG; when **`BROWSER_SCREENSHOT_REQUIRE_BEARER=true`**, include the same **`Authorization: Bearer …`** as for MCP.
 3. **Operator-entered password (never in `task` text):** with **`SECRETS_MASTER_KEY`** set, restart MCP, call **`request_user_secret`**, operator opens **`submit_url`** on the PC, then use **`secret_prefill`** in **`browser_task`** with stored names. If your connector uses an explicit **`allowed_tools`** list, include **`request_user_secret`** there.
 4. If the connector reports vague “initialization / transport” errors for some tools but **`ping`** works, that is often **xAI’s MCP client** or **missing `allowed_tools`** — not your PC; still verify **`get_status`** and server logs.
 5. **Transport size:** keeping screenshots at **`screenshot_url`** avoids multi‑megabyte **`tools/call`** payloads that some MCP clients reject.

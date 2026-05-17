@@ -113,11 +113,23 @@ def _mcp_json_response_flag() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _grok_browser_playbook() -> list[str]:
+    """Browser guidance returned on every get_status (read after connector reset)."""
+    return [
+        "CONNECTOR RESET: Copy grok_allowed_tools_csv from this get_status into the Grok allowlist; fully stop/start MCP so new tools (e.g. browser_watch_*) register — hot reload is not enough.",
+        "TRANSPORT: browser_click/browser_type/browser_press_keys/browser_navigate default return_screenshot=false. return_screenshot=true runs a full CDP capture and often causes rmcp transport timeouts if used every click.",
+        "WATCH MODE (SPA / Kalshi-style): browser_open_tab → browser_watch_start → poll browser_watch_status or fetch_url(latest_frame_url) → browser_click(x, y, return_screenshot=false) from the image → browser_watch_stop.",
+        "SPA PAGE STATE: browser_get_page_state(include_visible_text=true) returns visible_regions with center_x/center_y. If element text is null, use light=true or coordinate clicks — not element_index alone.",
+        "TABS: tab_reused=true is normal for same tab_label. stale=true or tab_stale_hub_disconnected: reset_browser_hub then browser_open_tab(reuse_existing_tab=false).",
+        "browser_task: minutes-long; transport errors often mean client timeout while Chrome still works. Use granular tools + watch for browsing; browser_task only for captcha/heavy automation.",
+    ]
+
+
 def _grok_connector_hints() -> dict[str, Any]:
     """Actionable flags for Grok / xAI MCP clients (screenshots + secrets)."""
     pub = bool((os.getenv("PUBLIC_MCP_BASE_URL") or "").strip())
     secret_ok = secrets_store.master_key_configured()
-    hints: list[str] = []
+    hints: list[str] = list(_grok_browser_playbook())
     if not secret_ok:
         hints.append(
             "request_user_secret returns secrets_not_configured until SECRETS_MASTER_KEY is set in .env; restart MCP."
@@ -125,28 +137,15 @@ def _grok_connector_hints() -> dict[str, Any]:
     if not pub:
         hints.append(
             "Set PUBLIC_MCP_BASE_URL=https://<same-host-as-MCP> (no path). Screenshots are never inlined in MCP JSON; "
-            "the tool returns screenshot_url only — Grok (or a follow-up fetch_url) must HTTPS GET that URL to obtain the PNG."
+            "the tool returns screenshot_url only — Grok (or fetch_url) must HTTPS GET that URL for the PNG."
         )
     else:
         hints.append(
-            "Screenshots use screenshot_url only (no base64 in tool JSON). For vision, HTTPS GET the URL "
-            "(same origin as MCP; one-time token). Optional: BROWSER_SCREENSHOT_REQUIRE_BEARER=true requires "
-            "the same Authorization: Bearer as MCP on GET /browser-screenshot/… so a leaked URL alone is not enough."
+            "Screenshots: HTTPS GET screenshot_url or Watch latest_frame_url. Optional BROWSER_SCREENSHOT_REQUIRE_BEARER=true "
+            "requires the same Bearer as MCP on GET /browser-screenshot/… and /browser-watch/…/latest."
         )
     hints.append(
         "If the connector uses an explicit allowed_tools list, include every tool you need (copy grok_allowed_tools_csv from get_status) or leave the list empty when the client allows all tools."
-    )
-    hints.append(
-        "Prefer granular browser tools (browser_open_tab, browser_navigate, browser_get_page_state, browser_click, browser_type, browser_press_keys) "
-        "for login and vision: each call returns in seconds. Use return_screenshot=true for screenshot_url after each step."
-    )
-    hints.append(
-        "Watch Mode: browser_watch_start(tab_id) then poll browser_watch_status or fetch_url(latest_frame_url) every ~2s for near-real-time vision; browser_watch_stop when done. "
-        "browser_open_tab reuses an idle tab when tab_label matches (tab_reused=true); pass reuse_existing_tab=false for a fresh tab."
-    )
-    hints.append(
-        "browser_task holds the MCP connection for the whole agent run (minutes). Grok transport errors on browser_task often mean the client timed out while Chrome is still working. "
-        "Use continue_tab_id on an existing tab for fuzzy multi-step work only. Each new browser_task without continue_tab_id opens another tab (browser-use titles them 'Starting agent …')."
     )
     if omi_api_key_configured():
         hints.append(
@@ -160,7 +159,10 @@ def _grok_connector_hints() -> dict[str, Any]:
         )
     return {
         "grok_connector_hints": hints,
+        "grok_browser_playbook": _grok_browser_playbook(),
         "screenshot_delivery": "screenshot_url_only",
+        "browser_click_default_return_screenshot": False,
+        "browser_watch_recommended_for_spa": True,
     }
 
 
@@ -822,23 +824,33 @@ def register_tools(mcp: FastMCP) -> None:
     async def browser_navigate(
         tab_id: str,
         url: str,
-        return_screenshot: bool = True,
+        return_screenshot: bool = False,
     ) -> dict[str, Any]:
-        """Navigate a tracked tab to an https URL. Fast; optional screenshot_url when return_screenshot=true."""
+        """
+        Navigate a tracked tab to an https URL. Fast.
+        Default return_screenshot=false (use browser_watch_start or browser_capture_tab_screenshot for vision).
+        """
         if (g := tool_gating.tool_disabled_error("browser_navigate")) is not None:
             return g
         out = await browser_granular.navigate(tab_id, url)
         return await _merge_tab_screenshot(tab_id, return_screenshot, out)
 
     @mcp.tool()
-    async def browser_get_page_state(tab_id: str) -> dict[str, Any]:
+    async def browser_get_page_state(
+        tab_id: str,
+        light: bool = False,
+        include_visible_text: bool = True,
+    ) -> dict[str, Any]:
         """
-        Bounded interactive element list (index, tag, id, name, placeholder, …) for browser_click/browser_type.
-        Call after navigation; refresh after each action if the page changes.
+        Interactive elements (index, tag, text, data_testid, …) plus visible_regions for JS/SPA sites.
+        light=true: skip heavy selector_map (faster); visible_regions only.
+        On React SPAs prefer visible_regions.center_x/center_y with browser_click(x, y) or Watch Mode.
         """
         if (g := tool_gating.tool_disabled_error("browser_get_page_state")) is not None:
             return g
-        return await browser_granular.get_page_state(tab_id)
+        return await browser_granular.get_page_state(
+            tab_id, light=light, include_visible_text=include_visible_text
+        )
 
     @mcp.tool()
     async def browser_click(
@@ -847,9 +859,12 @@ def register_tools(mcp: FastMCP) -> None:
         css_selector: str = "",
         x: float | None = None,
         y: float | None = None,
-        return_screenshot: bool = True,
+        return_screenshot: bool = False,
     ) -> dict[str, Any]:
-        """Click by element index (from browser_get_page_state), css_selector, or x/y coordinates."""
+        """
+        Click by element index, css_selector, or viewport x/y (best for SPAs with Watch Mode).
+        Default return_screenshot=false — use Watch or browser_capture_tab_screenshot to avoid transport timeouts.
+        """
         if (g := tool_gating.tool_disabled_error("browser_click")) is not None:
             return g
         out = await browser_granular.click(
@@ -869,10 +884,11 @@ def register_tools(mcp: FastMCP) -> None:
         css_selector: str = "",
         secret_name: str = "",
         clear_first: bool = True,
-        return_screenshot: bool = True,
+        return_screenshot: bool = False,
     ) -> dict[str, Any]:
         """
         Type into a field by element index or css_selector. Use secret_name (not raw password in tool args) for credentials.
+        Default return_screenshot=false when using Watch Mode.
         """
         if (g := tool_gating.tool_disabled_error("browser_type")) is not None:
             return g
@@ -890,9 +906,9 @@ def register_tools(mcp: FastMCP) -> None:
     async def browser_press_keys(
         tab_id: str,
         keys: str,
-        return_screenshot: bool = True,
+        return_screenshot: bool = False,
     ) -> dict[str, Any]:
-        """Send keys (e.g. Enter, Tab) to the focused tab. browser-use SendKeysEvent format."""
+        """Send keys (e.g. Enter, Tab) to the focused tab. Default return_screenshot=false."""
         if (g := tool_gating.tool_disabled_error("browser_press_keys")) is not None:
             return g
         out = await browser_granular.press_keys(tab_id, keys)

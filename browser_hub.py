@@ -28,8 +28,15 @@ class TabRecord:
     url: str | None = None
     title: str | None = None
     status: TabStatus = "running"
+    stale: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+
+
+HUB_RECOVERY_HINT = (
+    "Chrome may still be open but the server lost CDP tracking. Call reset_browser_hub, then "
+    "browser_open_tab (reuse_existing_tab=false for a fresh tab). Stale tab_id values are not attachable."
+)
 
 
 _hub_lock = asyncio.Lock()
@@ -70,7 +77,7 @@ def find_idle_tab_by_label(label: str) -> TabRecord | None:
         return None
     best: TabRecord | None = None
     for rec in _tabs.values():
-        if rec.status != "idle":
+        if rec.status != "idle" or rec.stale:
             continue
         if normalize_tab_label(rec.label) == key:
             if best is None or rec.updated_at > best.updated_at:
@@ -113,6 +120,21 @@ async def _cdp_url_alive(cdp_ws: str) -> bool:
         return False
 
 
+async def invalidate_cdp_mark_tabs_stale(reason: str = "cdp_lost") -> None:
+    """Drop CDP connection but keep tab metadata; mark tabs stale for list_browser_tabs / recovery hints."""
+    global _cdp_url, _headed_launched, _user_data_dir
+    logger.warning("browser hub CDP invalidated (tabs marked stale): %s", reason)
+    async with _launch_lock:
+        _cdp_url = None
+        _headed_launched = None
+        _user_data_dir = None
+    async with _hub_lock:
+        for rec in _tabs.values():
+            if rec.status != "closed":
+                rec.stale = True
+                rec.updated_at = time.time()
+
+
 async def force_reset_browser_hub(reason: str = "manual_or_recovery") -> None:
     """Clear cached CDP URL and tab registry (e.g. after user closed Chromium). Next browser_task launches fresh."""
     global _cdp_url, _headed_launched, _user_data_dir
@@ -136,12 +158,17 @@ async def _ensure_cdp_url(*, headed: bool, user_data_dir: str | None) -> str:
     async with _launch_lock:
         if _cdp_url:
             if not await _cdp_url_alive(_cdp_url):
-                logger.warning("cached CDP port is dead (browser closed?); clearing hub state")
+                logger.warning("cached CDP port is dead (browser closed?); marking tabs stale")
+                dead_url = _cdp_url
                 _cdp_url = None
                 _headed_launched = None
                 _user_data_dir = None
                 async with _hub_lock:
-                    _tabs.clear()
+                    for rec in _tabs.values():
+                        if rec.status != "closed":
+                            rec.stale = True
+                            rec.updated_at = time.time()
+                logger.debug("invalidated dead cdp %s", (dead_url or "")[:48])
             else:
                 if headed and _headed_launched is False:
                     logger.warning(
@@ -188,7 +215,7 @@ async def create_attached_session(*, headed: bool, user_data_dir: str | None) ->
                 attempt + 1,
                 e,
             )
-            await force_reset_browser_hub(f"attach_or_start_failed:{type(e).__name__}")
+            await invalidate_cdp_mark_tabs_stale(f"attach_or_start_failed:{type(e).__name__}")
     assert last_err is not None
     raise last_err
 
@@ -232,11 +259,13 @@ async def attach_session_for_tab(tab_id: str) -> tuple[Any | None, str | None]:
     if not tid:
         return None, "tab_id_required"
     if not _cdp_url:
-        return None, "browser_hub_inactive_run_browser_task_first"
+        return None, "browser_hub_inactive_or_cdp_lost"
     async with _hub_lock:
         rec = _tabs.get(tid)
         if not rec or rec.status == "closed":
             return None, "tab_not_found_or_closed"
+        if rec.stale:
+            return None, "tab_stale_hub_disconnected"
         target_id = rec.target_id
         headed = bool(_headed_launched)
         udd = _user_data_dir
@@ -405,6 +434,7 @@ def list_tabs(*, include_closed: bool = False) -> list[dict[str, Any]]:
                 "run_id": rec.run_id,
                 "label": rec.label,
                 "status": rec.status,
+                "stale": rec.stale,
                 "url": rec.url,
                 "title": rec.title,
                 "target_id": rec.target_id,
@@ -418,21 +448,28 @@ def list_tabs(*, include_closed: bool = False) -> list[dict[str, Any]]:
 def tabs_summary_for_status() -> dict[str, Any]:
     running = sum(1 for t in _tabs.values() if t.status == "running")
     idle = sum(1 for t in _tabs.values() if t.status == "idle")
+    stale = sum(1 for t in _tabs.values() if t.stale and t.status != "closed")
     open_tabs = list_tabs(include_closed=False)
-    return {
-        "browser_hub_active": _cdp_url is not None,
+    hub_active = _cdp_url is not None
+    out: dict[str, Any] = {
+        "browser_hub_active": hub_active,
+        "browser_hub_cdp_connected": hub_active,
         "browser_tabs_running": running,
         "browser_tabs_idle": idle,
+        "browser_tabs_stale": stale,
         "browser_task_max_concurrent": max_concurrent(),
         "browser_tabs": open_tabs[:25],
-        "browser_tabs_hint": (
+    }
+    if stale and not hub_active:
+        out["browser_hub_recovery_hint"] = HUB_RECOVERY_HINT
+    if open_tabs:
+        out["browser_tabs_hint"] = (
             "Before opening a duplicate task, check browser_tabs (or list_browser_tabs). "
             "To continue on an existing idle tab, call browser_task with continue_tab_id=<tab_id>. "
-            "For step-by-step control use browser_open_tab / browser_navigate / browser_click; for PNG use browser_capture_tab_screenshot(tab_id)."
-            if open_tabs
-            else None
-        ),
-    }
+            "For step-by-step control use browser_open_tab / browser_navigate / browser_click; for PNG use browser_capture_tab_screenshot(tab_id). "
+            "Ignore stale=true tabs unless you reset_browser_hub first."
+        )
+    return out
 
 
 async def capture_tab_viewport_png_bytes(tab_id: str) -> tuple[bytes | None, str | None]:
@@ -446,11 +483,13 @@ async def capture_tab_viewport_png_bytes(tab_id: str) -> tuple[bytes | None, str
     if not tid:
         return None, "tab_id_required"
     if not _cdp_url:
-        return None, "browser_hub_inactive_run_browser_task_first"
+        return None, "browser_hub_inactive_or_cdp_lost"
     async with _hub_lock:
         rec = _tabs.get(tid)
         if not rec or rec.status == "closed":
             return None, "tab_not_found_or_closed"
+        if rec.stale:
+            return None, "tab_stale_hub_disconnected"
         target_id = rec.target_id
         headed = bool(_headed_launched)
         udd = _user_data_dir

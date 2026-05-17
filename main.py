@@ -99,8 +99,9 @@ def build_mcp() -> FastMCP:
         instructions=(
             "Remote tools: ping, fetch_url, github_get_file (ref=branch/tag/SHA + content_text), github_list_repo_files, "
             "github_get_diff, github_create_issue, request_user_secret (127.0.0.1 form on PC), list_secrets, revoke_secret, "
-            "browser_open_tab, browser_navigate, browser_get_page_state, browser_click, browser_type, browser_press_keys, "
-            "browser_watch_start/status/stop (near-real-time frames), browser_task (shared Chrome; continue_tab_id), "
+            "browser_open_tab, browser_navigate, browser_get_page_state (visible_regions for SPAs), "
+            "browser_click (x/y for SPAs; return_screenshot default false), browser_type, browser_press_keys, "
+            "browser_watch_start/status/stop (preferred vision for browsing), browser_task (long runs; use sparingly), "
             "browser_capture_tab_screenshot, list_browser_tabs, close_browser_tab, "
             "cursor_agent (levels 1/2/3; approve_cursor_writes with optional always_allow_level_3_rule), revoke_cursor_writes, "
             "omi_recall, omi_remember, omi_ping, omi_sync_index, "

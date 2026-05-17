@@ -139,15 +139,21 @@ Exact names (for `allowed_tools` in Grok):
 
 ### Granular browser (preferred over long `browser_task`)
 
-1. **`browser_open_tab`** (`headed=true` for login, **`tab_label`** e.g. `"golf login"`) → **`tab_id`** (repeat call with same label → **`tab_reused: true`** if tab still idle)
-2. **`browser_watch_start(tab_id, duration_seconds=20, interval_seconds=2)`** → poll **`browser_watch_status`** or **`fetch_url(latest_frame_url)`** every ~2s for vision; **`browser_watch_stop`** when done
-3. **`browser_navigate(tab_id, url)`** with **`return_screenshot=true`**
-4. **`browser_get_page_state(tab_id)`** → use **`index`** in **`browser_click`** / **`browser_type`**
-5. Credentials: **`request_user_secret`** on PC, then **`browser_type(..., secret_name="…")`** — never raw passwords in tool JSON
-6. **`browser_press_keys(tab_id, keys="Enter")`** to submit
-7. Action-specific vision: **`return_screenshot=true`** on click/type; watch URL for continuous context
+**After MCP restart:** call **`get_status`** → read **`grok_browser_playbook`** and copy **`grok_allowed_tools_csv`** into the connector allowlist.
 
-Avoid starting a new **`browser_task`** for every step (transport timeouts + extra “Starting agent …” tabs). Use **`browser_task`** only for captcha / exploratory automation. **`browser_task`** label auto-continue: **`BROWSER_AUTO_CONTINUE_TAB_BY_LABEL=true`** (default **false**).
+1. **`browser_open_tab`** (`headed=true`, **`tab_label`**) → **`tab_id`** (**`tab_reused: true`** when same idle label)
+2. **`browser_watch_start`** → poll **`browser_watch_status`** / **`fetch_url(latest_frame_url)`**
+3. **`browser_click(tab_id, x=, y=, return_screenshot=false)`** — coordinate clicks from watch frames (SPAs)
+4. **`browser_get_page_state(include_visible_text=true, light=true)`** → **`visible_regions`** with **`center_x`/`center_y`** when element text is null
+5. **`browser_navigate`**, **`browser_type`**, **`browser_press_keys`** — all default **`return_screenshot=false`**
+6. One-off PNG: **`browser_capture_tab_screenshot`** only when needed
+7. **`browser_watch_stop`** when done
+
+**Transport:** rmcp errors on **`browser_click`** with **`return_screenshot=true`** every step are expected — use Watch instead.
+
+**Stale tabs:** **`stale: true`** or **`tab_stale_hub_disconnected`** → **`reset_browser_hub`**, then **`browser_open_tab(reuse_existing_tab=false)`**.
+
+Avoid **`browser_task`** per step. Use **`browser_task`** only for captcha / heavy automation.
 
 ### `browser_task`: screenshots (what Grok should pass and expect)
 
